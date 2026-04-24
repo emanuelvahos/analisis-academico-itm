@@ -1,0 +1,13 @@
+# Variables de entorno
+.env
+
+# Archivos de Python
+__pycache__/
+*.pyc
+
+# Entornos virtuales (si llegas a usar uno)
+venv/
+env/
+
+# Archivos de datos pesados (opcional, si no quieres subir el CSV original)
+*.csv
