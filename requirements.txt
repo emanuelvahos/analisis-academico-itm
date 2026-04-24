@@ -1,0 +1,11 @@
+pandas
+openpyxl
+supabase
+python-dotenv
+psycopg2-binary
+matplotlib
+seaborn
+scipy
+#python scripts/etl_pipeline.py
+#.\venv\Scripts\activate
+#pip install -r requirements.txt
