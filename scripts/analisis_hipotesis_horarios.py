@@ -1,159 +1,146 @@
 import os
 import pandas as pd
-import matplotlib.pyplot as plt
 import seaborn as sns
-from supabase import create_client, Client
+import matplotlib.pyplot as plt
 from dotenv import load_dotenv
+from supabase import create_client, Client
+import statsmodels.formula.api as smf
+import warnings
+
+# Silenciar advertencias de formato de Pandas
+warnings.filterwarnings('ignore')
 
 # ==========================================
-# 1. Configuración y Conexión a Supabase
+# 1. CONFIGURACIÓN
 # ==========================================
 load_dotenv()
-
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
-
-if not SUPABASE_URL or not SUPABASE_KEY:
-    raise ValueError("Faltan variables de entorno SUPABASE_URL o SUPABASE_SERVICE_ROLE_KEY.")
-
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# ==========================================
-# 2. Extracción de Datos
-# ==========================================
 def fetch_table(table_name: str, columns: str = "*") -> pd.DataFrame:
-    """Extrae todos los registros de una tabla en Supabase y retorna un DataFrame."""
-    # Nota: Si las tablas tienen >1000 registros, la API de Supabase pagina por defecto.
-    # Para datasets masivos, lo ideal es usar count y paginar iterativamente.
-    # Asumimos una muestra representativa o extracción directa sin límite para este análisis.
-    response = supabase.table(table_name).select(columns).limit(10000).execute()
-    return pd.DataFrame(response.data)
-
-print("Iniciando extracción de datos desde Supabase...")
-
-# Extraemos solo las columnas necesarias para no saturar memoria
-df_performance = fetch_table("academic_performance", "group_id, is_passing")
-df_groups = fetch_table("class_groups", "id, subject_id, teacher_id")
-df_subjects = fetch_table("subjects", "id, name")
-df_teachers = fetch_table("teachers", "id, full_name")
-df_schedules = fetch_table("group_schedules", "group_id, day_of_week, start_time")
+    """Extrae TODOS los registros paginando para evadir el límite de 1000 de Supabase."""
+    all_data = []
+    start = 0
+    page_size = 1000
+    
+    while True:
+        response = supabase.table(table_name).select(columns).range(start, start + page_size - 1).execute()
+        data = response.data
+        if not data: break
+        all_data.extend(data)
+        if len(data) < page_size: break
+        start += page_size
+        
+    return pd.DataFrame(all_data)
 
 # ==========================================
-# 3. Limpieza y Cruce de Datos (Joins)
+# 2. EXTRACCIÓN Y CRUCE
 # ==========================================
-print("Procesando y cruzando la información...")
+print("📥 Iniciando extracción masiva de datos desde la nube...")
+df_perf = fetch_table("academic_performance")
+df_groups = fetch_table("class_groups").rename(columns={'id': 'group_id'})
+df_sched = fetch_table("group_schedules")
+df_teachers = fetch_table("teachers").rename(columns={'id': 'teacher_id', 'full_name': 'teacher_name'})
 
-# Renombramos columnas para facilitar los merges (evita conflictos de sufijos _x, _y)
-df_groups = df_groups.rename(columns={'id': 'group_id'})
-df_subjects = df_subjects.rename(columns={'id': 'subject_id', 'name': 'subject_name'})
-df_teachers = df_teachers.rename(columns={'id': 'teacher_id', 'full_name': 'teacher_name'})
+print("🔄 Cruzando tablas relacionales...")
 
-# Realizamos las uniones (Inner Joins) para construir el Dataset Analítico
-df_master = df_performance.merge(df_groups, on='group_id', how='inner')
-df_master = df_master.merge(df_subjects, on='subject_id', how='inner')
+# Bórramos la columna duplicada 'tenant_id' de las tablas secundarias para evitar choques en Pandas
+df_groups = df_groups.drop(columns=['tenant_id', 'created_at', 'updated_at'], errors='ignore')
+df_sched = df_sched.drop(columns=['tenant_id', 'created_at', 'updated_at'], errors='ignore')
+df_teachers = df_teachers.drop(columns=['tenant_id', 'created_at', 'updated_at'], errors='ignore')
+
+# Unimos Notas -> Grupos -> Horarios -> Profesores
+df_master = df_perf.merge(df_groups, on='group_id', how='inner')
+df_master = df_master.merge(df_sched, on='group_id', how='inner')
 df_master = df_master.merge(df_teachers, on='teacher_id', how='inner')
-df_master = df_master.merge(df_schedules, on='group_id', how='inner')
 
-# Convertimos el boolean (Aprobó: True/False) a variable dummy de Mortalidad (Reprobó: 1/0)
-# Esto facilita calcular la "tasa" usando la media aritmética
-df_master['reprobo'] = df_master['is_passing'].apply(lambda x: 1 if x is False else 0)
+# ==========================================
+# 3. LIMPIEZA Y CORRECCIÓN DE SESGOS
+# ==========================================
+print("🧹 Aplicando corrección de horas fantasmas y empaquetando en bloques...")
 
-# Diccionario para mapear días de la semana
-dias_semana = {1: 'Lunes', 2: 'Martes', 3: 'Miércoles', 4: 'Jueves', 5: 'Viernes', 6: 'Sábado', 7: 'Domingo'}
+# Convertir la columna de texto de la BD a objeto de tiempo (extraemos la hora)
+df_master['hora_cruda'] = pd.to_datetime(df_master['start_time'], format='%H:%M:%S', errors='coerce').dt.hour
+
+# ELIMINAR SESGO: Si la hora es <= 5 (ej. 4 AM), significa que era 4 PM (16:00) en la realidad
+df_master['hora_real'] = df_master['hora_cruda'].apply(lambda x: x + 12 if x <= 5 else x)
+
+# ---------------- NUEVO CÓDIGO DE EMPAQUETADO (CORREGIDO) ----------------
+# Redujimos el límite hasta las 22 (10:00 PM) para que las clases fantasma desaparezcan
+limites = [6, 8, 10, 12, 14, 16, 18, 20, 22]
+etiquetas = ['06:00-08:00', '08:00-10:00', '10:00-12:00', '12:00-14:00', 
+             '14:00-16:00', '16:00-18:00', '18:00-20:00', '20:00-22:00']
+
+# Empaquetamos. Cualquier hora rara que pase de las 22:00 quedará como "NaN" (Nula)
+df_master['franja_horaria'] = pd.cut(df_master['hora_real'], bins=limites, labels=etiquetas, right=False)
+
+# Al eliminar los nulos, eliminamos automáticamente a los "fantasmas" de la madrugada
+df_master = df_master.dropna(subset=['franja_horaria'])
+# -------------------------------------------------------------
+
+# Definir Mortalidad: Si la definitiva es menor a 3.0 (incluye abandonos y ceros) = 1 (Mortalidad)
+df_master['mortalidad'] = df_master['final_grade'].apply(lambda x: 1 if float(x) < 3.0 else 0)
+
+# Mapear días de la semana
+dias_semana = {1: 'Lunes', 2: 'Martes', 3: 'Miércoles', 4: 'Jueves', 5: 'Viernes', 6: 'Sábado'}
 df_master['dia_nombre'] = df_master['day_of_week'].map(dias_semana)
 
 # ==========================================
-# 4. Análisis de la Hipótesis de la Profesora
+# 4. AISLAMIENTO ESTADÍSTICO (REGRESIÓN LOGÍSTICA)
 # ==========================================
-ASIGNATURA_OBJETIVO = "Cálculo"
+print("\n🧠 Ejecutando modelo de aislamiento estadístico (Horario vs Profesor)...")
 
-# Filtramos usando contains para atrapar 'Cálculo Diferencial', 'Cálculo Integral', etc.
-df_filtered = df_master[df_master['subject_name'].str.contains(ASIGNATURA_OBJETIVO, case=False, na=False)]
+# Usamos IDs en lugar de nombres para que la fórmula matemática no falle con espacios
+df_master['profe_codigo'] = df_master['teacher_id'].astype('category').cat.codes
 
-if df_filtered.empty:
-    print(f"No se encontraron registros para la asignatura: {ASIGNATURA_OBJETIVO}")
-else:
-    print(f"Registros encontrados para {ASIGNATURA_OBJETIVO}: {len(df_filtered)}")
+try:
+    # Fórmula: ¿La mortalidad se explica por la franja horaria controlando al profesor?
+    modelo = smf.logit('mortalidad ~ C(franja_horaria) + C(profe_codigo)', data=df_master).fit(disp=0)
     
-    # Agrupamos por Docente, Día y Hora de inicio
-    # Calculamos el % de reprobación (Tasa de Mortalidad)
-    grouped = df_filtered.groupby(['teacher_name', 'dia_nombre', 'start_time']).agg(
-        total_estudiantes=('reprobo', 'count'),
-        tasa_mortalidad=('reprobo', 'mean')
-    ).reset_index()
-
-    # Filtramos grupos con muy pocos estudiantes para no sesgar el % (ej. mínimo 5 estudiantes)
-    grouped = grouped[grouped['total_estudiantes'] >= 5]
+    print("\n" + "="*60)
+    print("--- RESULTADOS PUROS DEL HORARIO (Sin sesgo de profesor) ---")
     
-    # Multiplicamos por 100 para visualizar en porcentaje (%)
-    grouped['tasa_mortalidad_pct'] = grouped['tasa_mortalidad'] * 100
-
-    # ==========================================
-    # 5. Visualización de Resultados (Heatmap)
-    # ==========================================
-    print("Generando visualización (Heatmap)...")
+    # Extraemos solo los resultados que corresponden a las horas
+    pvalues_horas = modelo.pvalues[modelo.pvalues.index.str.contains('franja_horaria')]
+    horas_criticas = pvalues_horas[pvalues_horas < 0.05]
     
-    # Creamos un Pivot Table ideal para un Heatmap
-    # Filas: Docentes, Columnas: Hora de inicio, Valores: Tasa de mortalidad (%)
-    # Se podría incluir el día, pero para la hipótesis (6am vs 10am) cruzamos hora y docente.
-    heatmap_data = df_filtered.groupby(['teacher_name', 'start_time'])['reprobo'].mean().reset_index()
-    heatmap_data['tasa_mortalidad_pct'] = heatmap_data['reprobo'] * 100
-    pivot_table = heatmap_data.pivot(index='teacher_name', columns='start_time', values='tasa_mortalidad_pct')
-    
-    # Configuración del lienzo de Matplotlib
-    plt.figure(figsize=(12, 7))
-    sns.set_theme(style="whitegrid")
-    
-    # Trazamos el Heatmap con Seaborn
-    ax = sns.heatmap(
-        pivot_table, 
-        annot=True,              # Mostrar el número dentro de la celda
-        fmt=".1f",               # 1 decimal
-        cmap="YlOrRd",           # Paleta Semáforo: Amarillo (bajo) a Rojo (alto)
-        cbar_kws={'label': '% de Mortalidad (Reprobados / Desertores)'},
-        linewidths=.5,           # Líneas de separación
-        vmin=0, vmax=100         # Rango fijo de 0 a 100%
-    )
-    
-    # Estilos de títulos y etiquetas
-    plt.title(f'¿Impacta la franja horaria en la mortalidad de {ASIGNATURA_OBJETIVO}?', fontsize=16, fontweight='bold', pad=20)
-    plt.xlabel('Hora de Inicio de la Clase', fontsize=12, fontweight='bold')
-    plt.ylabel('Docente', fontsize=12, fontweight='bold')
-    
-    # Rotar las horas para mejor lectura si hay muchas
-    plt.xticks(rotation=45)
-    plt.tight_layout()
-    
-    # Guardar gráfico y mostrar
-    output_filename = "mortalidad_horario_heatmap.png"
-    plt.savefig(output_filename, dpi=300)
-    print(f"Análisis finalizado exitosamente. Gráfico guardado en el mismo directorio como '{output_filename}'")
-    
-    # plt.show() # Descomentar para ver en ventana si se corre localmente o en Jupyter
-
-    # ==========================================
-    # 6. Validación Estadística (Test de Chi-cuadrado)
-    # ==========================================
-    from scipy.stats import chi2_contingency
-
-    print("\n" + "="*50)
-    print("--- RESULTADOS DE LA VALIDACIÓN ESTADÍSTICA ---")
-    
-    # Creamos una tabla de contingencia: Frecuencia de Aprobados vs Reprobados por Horario
-    contingency_table = pd.crosstab(df_filtered['start_time'], df_filtered['reprobo'])
-    
-    # Ejecutamos el test de Chi-cuadrado de independencia
-    chi2_stat, p_val, dof, ex = chi2_contingency(contingency_table)
-    
-    print(f"Valor p (p-value) obtenido: {p_val:.5f}")
-    print("="*50)
-    
-    # Interpretación automática
-    ALPHA = 0.05
-    if p_val < ALPHA:
-        print("CONCLUSIÓN: La diferencia de mortalidad entre las franjas horarias ES estadísticamente significativa.")
-        print("-> La hipótesis de la profesora está respaldada matemáticamente: el horario SÍ impacta en la tasa de reprobación.")
+    if not horas_criticas.empty:
+        print("🚨 CONCLUSIÓN: La hipótesis es CORRECTA. Incluso aislando a los profesores estrictos,")
+        print("la hora de la clase impacta fuertemente en el rendimiento del estudiante.")
+        print("Franjas con impacto estadísticamente comprobado (p-value < 0.05):")
+        print(horas_criticas.to_string())
     else:
-        print("CONCLUSIÓN: La diferencia de mortalidad entre las franjas horarias NO es estadísticamente significativa.")
-        print("-> La hipótesis de la profesora NO se respalda con los datos actuales: cualquier variación entre horarios podría deberse al azar.")
-    print("="*50 + "\n")
+        print("🟢 CONCLUSIÓN: La hipótesis inicial fue un espejismo.")
+        print("Al aislar a los profesores, el horario por sí solo NO tiene un impacto matemático real.")
+    print("="*60 + "\n")
+    
+except Exception as e:
+    print(f"⚠️ Advertencia estadística: {e}")
+
+# ==========================================
+# 5. VISUALIZACIÓN CORREGIDA
+# ==========================================
+print("🎨 Generando el Heatmap definitivo...")
+
+# Ordenar días y horas lógicamente
+orden_dias = ['Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado']
+orden_horas = sorted(df_master['franja_horaria'].unique())
+
+pivot_table = df_master.pivot_table(
+    values='mortalidad', 
+    index='franja_horaria', 
+    columns='dia_nombre', 
+    aggfunc='mean'
+)
+pivot_table = pivot_table.reindex(index=orden_horas, columns=orden_dias)
+
+plt.figure(figsize=(12, 8))
+sns.heatmap(pivot_table, annot=True, fmt=".1%", cmap="YlOrRd", linewidths=.5, vmin=0, vmax=1)
+plt.title('Tasa Real de Mortalidad Académica por Franja Horaria\n(Datos corregidos y sin sesgo de madrugada)', fontsize=16, pad=20)
+plt.xlabel('Día de la Semana', fontsize=12)
+plt.ylabel('Franja Horaria (Hora Exacta)', fontsize=12)
+plt.tight_layout()
+
+plt.savefig('mortalidad_horario_corregida.png', dpi=300, bbox_inches='tight')
+print("✅ Análisis finalizado. Nueva gráfica guardada como 'mortalidad_horario_corregida.png'")

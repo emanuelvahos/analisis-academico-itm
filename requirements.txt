@@ -6,6 +6,9 @@ psycopg2-binary
 matplotlib
 seaborn
 scipy
+statsmodels
+#python scripts/analisis_hipotesis_horarios.py
 #python scripts/etl_pipeline.py
 #.\venv\Scripts\activate
+#python scripts/analisis_sociodemografico.py
 #pip install -r requirements.txt

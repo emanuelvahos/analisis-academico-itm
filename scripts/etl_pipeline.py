@@ -5,195 +5,137 @@ from openpyxl import load_workbook
 from supabase import create_client, Client
 from dotenv import load_dotenv
 
-# 1. Configuración de Logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
+# 1. Configuración
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Cargar variables de entorno
 load_dotenv()
-
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
 TENANT_ID = os.environ.get("TENANT_ID")
 
 if not SUPABASE_URL or not SUPABASE_KEY:
-    logger.error("Faltan variables de entorno SUPABASE_URL o SUPABASE_SERVICE_ROLE_KEY.")
+    logger.error("Faltan variables de entorno.")
     exit(1)
 
-# Inicializar cliente de Supabase
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-
 def clean_column_names(columns: list) -> list:
-    """Convierte los nombres de las columnas a snake_case."""
-    return (
-        pd.Series(columns)
-        .astype(str)
-        .str.strip()
-        .str.lower()
-        .str.replace(' ', '_')
-        .str.replace(r'[^\w\s]', '', regex=True)
-        .tolist()
-    )
-
-
-def format_time(row) -> str:
-    """Formatea la hora inicial y minutos a HH:MM."""
-    try:
-        # Ajusta los nombres 'hora_inicial' y 'minutos' según queden tras el snake_case
-        h = row.get('hora_inicial')
-        m = row.get('minutos')
-        
-        if pd.isna(h) or pd.isna(m):
-            return None
-            
-        return f"{int(h):02d}:{int(m):02d}"
-    except (ValueError, TypeError):
-        return None
-
-
-def clean_chunk(df: pd.DataFrame) -> pd.DataFrame:
-    """Aplica las reglas de limpieza y transformación al chunk."""
-    
-    # 2. Rellenar valores nulos en notas parciales con 0
-    # Buscamos columnas que puedan contener notas parciales
-    partial_grade_cols = [col for col in df.columns if 'nota' in col or 'parcial' in col]
-    for col in partial_grade_cols:
-        # Convertimos a numérico por si vienen como texto, rellenamos con 0
-        df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
-        
-    # 3. Formatear la hora
-    if 'hora_inicial' in df.columns and 'minutos' in df.columns:
-        df['formatted_time'] = df.apply(format_time, axis=1)
-        
-    # Inyectar el tenant_id a todos los registros
-    if TENANT_ID:
-        df['tenant_id'] = TENANT_ID
-        
-    return df
-
+    return pd.Series(columns).astype(str).str.strip().str.lower().str.replace(' ', '_').str.replace(r'[^\w\s]', '', regex=True).tolist()
 
 def upsert_batch(table_name: str, records: list, conflict_columns: str):
-    """Ejecuta un batch upsert a Supabase."""
-    if not records:
-        return
+    if not records: return
     try:
-        # El método .upsert maneja inserción o actualización basada en on_conflict
-        response = supabase.table(table_name).upsert(
-            records, 
-            on_conflict=conflict_columns
-        ).execute()
-        
+        supabase.table(table_name).upsert(records, on_conflict=conflict_columns).execute()
     except Exception as e:
-        logger.error(f"Error realizando upsert en tabla '{table_name}': {e}")
-
+        logger.error(f"Error en tabla {table_name}: {e}")
+        raise e
 
 def process_and_upload(df_chunk: pd.DataFrame):
-    """
-    Separa el chunk en las distintas entidades (Estudiantes, Asignaturas, etc.)
-    y las sube a Supabase de forma relacional.
-    """
-    df = clean_chunk(df_chunk)
+    df = df_chunk.copy()
+    if TENANT_ID: df['tenant_id'] = TENANT_ID
     
-    # NOTA: Los nombres de columnas exactos dependerán de tu Excel original.
-    # A continuación se ilustra la lógica utilizando nombres inferidos.
-    
-    # -- 1. SUBIR ESTUDIANTES --
-    # Supongamos que la columna del documento se llama 'documento_estudiante'
-    if 'documento_estudiante' in df.columns:
-        students_df = df[['documento_estudiante', 'nombre_estudiante', 'email', 'tenant_id']].copy()
-        students_df = students_df.rename(columns={
-            'documento_estudiante': 'external_id',
-            'nombre_estudiante': 'full_name'
-        })
-        # Limpiar duplicados dentro de este mismo chunk
-        students_df = students_df.drop_duplicates(subset=['external_id'])
-        
-        # Eliminar filas donde no haya external_id válido
-        students_df = students_df.dropna(subset=['external_id'])
-        
-        # Upsert a Supabase (asumiendo constraint unique_tenant_external_id)
-        upsert_batch('students', students_df.to_dict(orient='records'), 'tenant_id, external_id')
+    # Normalización de textos y códigos
+    for col in ['documento', 'grupo', 'codigo_asignatura']:
+        if col in df.columns:
+            df[col] = df[col].astype(str).str.replace('.0', '', regex=False).str.strip()
 
-    # -- 2. SUBIR CLASES/GRUPOS --
-    if 'id_clase' in df.columns:
-        classes_df = df[['id_clase', 'nombre_asignatura', 'formatted_time', 'tenant_id']].copy()
-        classes_df = classes_df.rename(columns={'id_clase': 'group_code'})
-        classes_df = classes_df.drop_duplicates(subset=['group_code'])
-        classes_df = classes_df.dropna(subset=['group_code'])
-        
-        # Nota: aquí habría que asociar el subject_id (asignatura) buscándolo o insertándolo antes
-        # upsert_batch('class_groups', classes_df.to_dict('records'), 'tenant_id, group_code')
+    if 'nombres_docente' in df.columns:
+        df['docente_full_name'] = (df['nombres_docente'].fillna('') + ' ' + df['apellidos_docente'].fillna('')).str.strip()
 
-    # -- 3. SUBIR NOTAS (Tabla de relación) --
-    # Requiere cruzar el ID generado del estudiante y el ID del grupo de clase, 
-    # o usar los external_id si tu tabla lo permite
-    pass
+    # A. Catálogos
+    if 'documento' in df.columns:
+        students_df = df[['documento', 'nombres', 'apellidos', 'correo_electronico', 'tenant_id']].copy()
+        students_df['full_name'] = (students_df['nombres'].fillna('') + ' ' + students_df['apellidos'].fillna('')).str.strip()
+        students_df = students_df.rename(columns={'documento': 'external_id', 'correo_electronico': 'email'})
+        students_df = students_df[['external_id', 'full_name', 'email', 'tenant_id']].drop_duplicates('external_id').dropna(subset=['external_id'])
+        upsert_batch('students', students_df.to_dict('records'), 'tenant_id, external_id')
 
+    if 'docente_full_name' in df.columns:
+        teachers_df = df[['docente_full_name', 'tenant_id']].copy().rename(columns={'docente_full_name': 'full_name'})
+        teachers_df = teachers_df.drop_duplicates('full_name').dropna(subset=['full_name'])
+        teachers_df = teachers_df[teachers_df['full_name'] != '']
+        upsert_batch('teachers', teachers_df.to_dict('records'), 'tenant_id, full_name')
 
-def run_etl_pipeline(file_path: str, chunk_size: int = 5000):
-    """
-    Lee un archivo XLSX masivo fila por fila para simular un chunksize 
-    extremadamente eficiente en memoria (Pandas read_excel no soporta chunksize).
-    """
-    logger.info(f"Iniciando pipeline ETL para: {file_path}")
-    
-    if not os.path.exists(file_path):
-        logger.error(f"El archivo {file_path} no existe.")
-        return
+    if 'codigo_asignatura' in df.columns:
+        subjects_df = df[['codigo_asignatura', 'asignatura', 'creditos', 'tenant_id']].copy()
+        subjects_df = subjects_df.rename(columns={'codigo_asignatura': 'code', 'asignatura': 'name', 'creditos': 'credits'})
+        subjects_df['credits'] = pd.to_numeric(subjects_df['credits'], errors='coerce').fillna(0).astype(int)
+        subjects_df = subjects_df.drop_duplicates('code').dropna(subset=['code'])
+        upsert_batch('subjects', subjects_df.to_dict('records'), 'tenant_id, code')
 
-    try:
-        # Se utiliza openpyxl en read_only=True para streamear el archivo sin cargarlo en RAM
-        wb = load_workbook(filename=file_path, read_only=True, data_only=True)
-        ws = wb.active
-        
-        # Crear un iterador sobre las filas
-        row_iterator = ws.iter_rows(values_only=True)
-        
-        # Obtener y estandarizar la cabecera
-        raw_headers = next(row_iterator)
-        headers = clean_column_names(raw_headers)
-        
-        chunk = []
-        chunk_number = 1
-        total_rows = 0
-        
-        logger.info(f"Cabeceras extraídas: {headers[:5]}... (total: {len(headers)})")
-        
-        for row in row_iterator:
-            chunk.append(row)
-            
-            # Cuando llegamos al tamaño del chunk, lo procesamos
-            if len(chunk) == chunk_size:
-                df_chunk = pd.DataFrame(chunk, columns=headers)
-                
-                logger.info(f"Procesando Chunk #{chunk_number} ({chunk_size} filas)...")
-                process_and_upload(df_chunk)
-                
-                total_rows += chunk_size
-                chunk = []
-                chunk_number += 1
-                
-        # Procesar el bloque remanente
-        if chunk:
-            df_chunk = pd.DataFrame(chunk, columns=headers)
-            logger.info(f"Procesando Chunk #{chunk_number} FINAL ({len(chunk)} filas)...")
-            process_and_upload(df_chunk)
-            total_rows += len(chunk)
-            
-        logger.info(f"Pipeline ETL completado exitosamente. Total registros procesados: {total_rows}")
-        
-    except Exception as e:
-        logger.error(f"Error crítico durante la ejecución del pipeline: {e}", exc_info=True)
+    # B. Mapeo de UUIDs
+    res_stud = supabase.table('students').select('id, external_id').eq('tenant_id', TENANT_ID).in_('external_id', df['documento'].unique().tolist()).execute()
+    map_students = {r['external_id']: r['id'] for r in res_stud.data}
 
+    res_teach = supabase.table('teachers').select('id, full_name').eq('tenant_id', TENANT_ID).in_('full_name', df['docente_full_name'].unique().tolist()).execute()
+    map_teachers = {r['full_name']: r['id'] for r in res_teach.data}
+
+    res_subj = supabase.table('subjects').select('id, code').eq('tenant_id', TENANT_ID).in_('code', df['codigo_asignatura'].unique().tolist()).execute()
+    map_subjects = {r['code']: r['id'] for r in res_subj.data}
+
+    # C. Grupos
+    if 'grupo' in df.columns:
+        groups_df = df[['grupo', 'año', 'semestre', 'codigo_asignatura', 'docente_full_name', 'tenant_id']].copy()
+        groups_df['semester'] = groups_df['año'].astype(str).str.replace('.0','') + '-' + groups_df['semestre'].astype(str).str.replace('.0','')
+        groups_df = groups_df.rename(columns={'grupo': 'group_code'})
+        groups_df['subject_id'] = groups_df['codigo_asignatura'].map(map_subjects)
+        groups_df['teacher_id'] = groups_df['docente_full_name'].map(map_teachers)
+        groups_df = groups_df[['group_code', 'semester', 'subject_id', 'teacher_id', 'tenant_id']].dropna().drop_duplicates(['group_code', 'subject_id', 'semester'])
+        upsert_batch('class_groups', groups_df.to_dict('records'), 'tenant_id, subject_id, semester, group_code')
+
+    res_groups = supabase.table('class_groups').select('id, group_code, subject_id, semester').eq('tenant_id', TENANT_ID).in_('group_code', df['grupo'].unique().tolist()).execute()
+    map_groups = {(r['group_code'], r['subject_id'], r['semester']): r['id'] for r in res_groups.data}
+
+    # D. Horarios
+    if 'dia' in df.columns:
+        sched_df = df.copy()
+        sched_df['semester'] = sched_df['año'].astype(str).str.replace('.0','') + '-' + sched_df['semestre'].astype(str).str.replace('.0','')
+        sched_df['subject_id'] = sched_df['codigo_asignatura'].map(map_subjects)
+        sched_df['group_id'] = list(zip(sched_df['grupo'], sched_df['subject_id'], sched_df['semester']))
+        sched_df['group_id'] = sched_df['group_id'].map(map_groups)
+        
+        dia_map = {'LUNES': 1, 'MARTES': 2, 'MIÉRCOLES': 3, 'JUEVES': 4, 'VIERNES': 5, 'SÁBADO': 6, 'DOMINGO': 7}
+        sched_df['day_of_week'] = sched_df['dia'].astype(str).str.upper().str.strip().map(dia_map)
+        sched_df['start_time'] = sched_df['hora_inicial'].astype(str).str.replace('.0','').str.zfill(2) + ':' + sched_df['minutos_hora_inicial'].astype(str).str.replace('.0','').str.zfill(2) + ':00'
+        
+        # Filtramos los nulos
+        sched_df = sched_df[['tenant_id', 'group_id', 'day_of_week', 'start_time', 'aula']].rename(columns={'aula': 'classroom'}).dropna(subset=['group_id', 'day_of_week'])
+        
+        # LA MAGIA: Forzamos la columna a entero para quitar el ".0"
+        sched_df['day_of_week'] = sched_df['day_of_week'].astype(int)
+        
+        sched_df['end_time'] = df['hora_final'].astype(str).str.replace('.0','').str.zfill(2) + ':' + df['minutos_hora_final'].astype(str).str.replace('.0','').str.zfill(2) + ':00'
+        
+        sched_final = sched_df[['tenant_id', 'group_id', 'day_of_week', 'start_time', 'end_time', 'classroom']].copy()
+        sched_final = sched_final.drop_duplicates(subset=['tenant_id', 'group_id', 'day_of_week', 'start_time'])
+        
+        upsert_batch('group_schedules', sched_final.to_dict('records'), 'tenant_id, group_id, day_of_week, start_time')
+    # E. Notas
+    if 'definitiva' in df.columns:
+        perf_df = df.copy()
+        perf_df['semester'] = perf_df['año'].astype(str).str.replace('.0','') + '-' + perf_df['semestre'].astype(str).str.replace('.0','')
+        perf_df['subject_id'] = perf_df['codigo_asignatura'].map(map_subjects)
+        perf_df['group_id'] = list(zip(perf_df['grupo'], perf_df['subject_id'], perf_df['semester']))
+        perf_df['group_id'] = perf_df['group_id'].map(map_groups)
+        perf_df['student_id'] = perf_df['documento'].map(map_students)
+        perf_df['final_grade'] = pd.to_numeric(perf_df['definitiva'].astype(str).str.replace(',', '.'), errors='coerce').fillna(0.0)
+        perf_df = perf_df[['tenant_id', 'student_id', 'group_id', 'final_grade']].dropna().drop_duplicates(['tenant_id', 'student_id', 'group_id'])
+        upsert_batch('academic_performance', perf_df.to_dict('records'), 'tenant_id, student_id, group_id')
+
+def run_etl_pipeline(file_path: str, chunk_size: int = 500):
+    wb = load_workbook(filename=file_path, read_only=True, data_only=True)
+    ws = wb.active
+    row_iterator = ws.iter_rows(values_only=True)
+    headers = clean_column_names(next(row_iterator))
+    chunk = []
+    for row in row_iterator:
+        chunk.append(row)
+        if len(chunk) == chunk_size:
+            process_and_upload(pd.DataFrame(chunk, columns=headers))
+            chunk = []
+    if chunk: process_and_upload(pd.DataFrame(chunk, columns=headers))
+    logger.info("✅ Pipeline completado.")
 
 if __name__ == "__main__":
-    # Archivo objetivo
-    EXCEL_FILE = "Desarrollo Curricular SIGA Semestre (1).xlsx"
-    
-    # Se ajusta el tamaño del chunk. 5000 es un buen equilibrio entre uso de RAM y 
-    # velocidad de peticiones a la API de Supabase.
-    run_etl_pipeline(EXCEL_FILE, chunk_size=5000)
+    run_etl_pipeline("Desarrollo Curricular SIGA Semestre (1).xlsx")
