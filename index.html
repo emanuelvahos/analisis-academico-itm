@@ -602,6 +602,7 @@
     line-height: 1.7;
   }
 </style>
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
 </head>
 <body>
 <div class="app">
@@ -715,16 +716,16 @@
       <!-- Page header -->
       <div class="page-header">
         <div>
-          <h1 class="page-title">Resumen General · Periodo 2024-1</h1>
+          <h1 class="page-title" id="page-title-text">Resumen General · Periodo 2025-1</h1>
           <div class="page-sub">
             <span class="live-dot"></span>
             Datos en vivo desde SIGA · 47.382 registros académicos analizados
           </div>
         </div>
         <div class="filter-bar">
-          <div class="seg">2023-2</div>
-          <div class="seg active">2024-1</div>
-          <div class="seg">Comparar</div>
+          <div class="seg" data-semestre="2024-2">2024-2</div>
+          <div class="seg active" data-semestre="2025-1">2025-1</div>
+          <div class="seg" id="btn-comparar">Comparar</div>
         </div>
       </div>
 
@@ -736,12 +737,12 @@
             <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
           </div>
           <div class="label">Mortalidad Global</div>
-          <div class="value" style="color:var(--danger)">34<span class="unit">%</span></div>
+          <div class="value" style="color:var(--danger)"><span id="kpi-mortalidad">0</span><span class="unit">%</span></div>
           <div class="delta up">
             <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="18 15 12 9 6 15"/></svg>
-            +2.4 pts vs semestre anterior
+            -
           </div>
-          <div class="foot"><strong>4.233</strong> estudiantes con definitiva &lt; 3.0</div>
+          <div class="foot"><strong>0</strong> estudiantes con definitiva &lt; 3.0</div>
         </div>
 
         <div class="card kpi">
@@ -749,12 +750,12 @@
             <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
           </div>
           <div class="label">Asignatura más crítica</div>
-          <div class="value text">Cálculo<br/><span style="font-size:14px;color:var(--text-2);font-weight:500">Diferencial e Integral</span></div>
+          <div class="value text"><span id="kpi-asignatura-nombre">-</span><br/><span style="font-size:14px;color:var(--text-2);font-weight:500" id="kpi-asignatura-pct">-</span></div>
           <div class="delta up">
             <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="18 15 12 9 6 15"/></svg>
-            72.4% de reprobación
+            -
           </div>
-          <div class="foot"><strong>891</strong> estudiantes inscritos · 23 grupos activos</div>
+          <div class="foot">-</div>
         </div>
 
         <div class="card kpi">
@@ -762,12 +763,12 @@
             <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
           </div>
           <div class="label">Total Estudiantes</div>
-          <div class="value">12.450</div>
+          <div class="value" id="kpi-estudiantes">0</div>
           <div class="delta down">
             <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"/></svg>
-            +312 estudiantes nuevos
+            -
           </div>
-          <div class="foot"><strong>28</strong> sedes activas · <strong>14</strong> programas académicos</div>
+          <div class="foot"><strong>0</strong> sedes activas · <strong>0</strong> programas académicos</div>
         </div>
 
       </div>
@@ -788,10 +789,7 @@
             </div>
           </div>
           <div class="chart-img-wrap">
-            <img
-              src="assets/mortalidad_horario_corregida.png"
-              alt="Mapa de calor de mortalidad académica por franja horaria y día de la semana"
-            />
+            <div id="chart-heatmap" style="width: 100%; height: 400px;"></div>
           </div>
         </div>
 
@@ -807,10 +805,7 @@
             </div>
           </div>
           <div class="chart-img-wrap">
-            <img
-              src="assets/docencia_top_severidad.png"
-              alt="Ranking de los 15 docentes con mayor tasa de mortalidad académica"
-            />
+            <div id="chart-ranking-docentes" style="width: 100%; height: 400px;"></div>
           </div>
         </div>
 
@@ -943,7 +938,7 @@
 
       <!-- Footnote -->
       <div class="footnote">
-        Fuente: SIGA · Desarrollo Curricular Semestre 2024-1 · 47.382 registros académicos cruzados con horarios y datos sociodemográficos.
+        Fuente: SIGA · Desarrollo Curricular Semestre 2025-1 · 47.382 registros académicos cruzados con horarios y datos sociodemográficos.
         Definición de mortalidad: nota definitiva &lt; 3.0 (incluye reprobaciones, abandonos y notas en cero).
         Las franjas horarias fueron corregidas para evitar el sesgo de timestamps AM (clases registradas como 4:00 corresponden a 16:00).
         Los modelos estadísticos descritos pueden auditarse desde <strong style="color:var(--brand)">/scripts/analisis_hipotesis_horarios.py</strong>.
@@ -1077,5 +1072,6 @@ const curva = [
   svg.innerHTML = html;
 })();
 </script>
+<script src="main.js"></script>
 </body>
 </html>
