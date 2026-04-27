@@ -1,7 +1,10 @@
 import os
 import pandas as pd
+import numpy as np
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from dotenv import load_dotenv
 from supabase import create_client, Client
 
@@ -41,6 +44,43 @@ def fetch_table(table_name: str, columns: str = "*") -> pd.DataFrame:
 
 # Caché en memoria para evitar consultar la base de datos en cada petición
 data_cache = {}
+
+def get_excel_data() -> pd.DataFrame:
+    """Extrae datos del archivo Excel para los análisis temporales y sociodemográficos."""
+    if "excel" in data_cache:
+        return data_cache["excel"]
+    
+    print("📥 Leyendo datos desde el Excel maestro...")
+    df = pd.read_excel("Desarrollo Curricular SIGA Semestre (1).xlsx")
+    df.columns = df.columns.str.strip().str.lower().str.replace(' ', '_')
+    
+    # Calcular Mortalidad
+    if 'definitiva' in df.columns:
+        df['definitiva_num'] = pd.to_numeric(df['definitiva'].astype(str).str.replace(',', '.'), errors='coerce').fillna(0)
+        df['mortalidad'] = df['definitiva_num'].apply(lambda x: 1 if x < 3.0 else 0)
+        
+    # Crear columna 'semester' para filtrar
+    if 'año' in df.columns and 'semestre' in df.columns:
+        df['semester'] = df['año'].astype(str).str.replace('.0', '', regex=False) + '-' + df['semestre'].astype(str).str.replace('.0', '', regex=False)
+        
+    # Calcular Hora Real y Jornada para el Excel
+    if 'hora_inicial' in df.columns:
+        df['hora_inicial_num'] = pd.to_numeric(df['hora_inicial'], errors='coerce')
+        df['hora_real'] = df['hora_inicial_num'].apply(lambda x: x + 12 if pd.notnull(x) and x <= 5 else x)
+        df['jornada'] = df['hora_real'].apply(lambda x: 'Nocturna (18:00 - 22:00)' if x >= 18 else 'Diurna (06:00 - 17:59)')
+
+    data_cache["excel"] = df
+    return df
+
+def clean_df_for_json(df):
+    """Limpia un DataFrame para evitar errores de serialización JSON con NaNs y tipos Numpy."""
+    df_clean = df.copy()
+    # Asegurar que las columnas numéricas críticas sean tipos nativos
+    for col in df_clean.select_dtypes(include=[np.number]).columns:
+        df_clean[col] = df_clean[col].astype(float)
+    # Reemplazar NaNs por None (nulos en JSON)
+    df_clean = df_clean.replace({float('nan'): None})
+    return df_clean.to_dict(orient='records')
 
 def get_master_data() -> pd.DataFrame:
     """Extrae y cruza los datos, guardando el resultado en caché."""
@@ -146,14 +186,17 @@ def get_heatmap(semestre: str = None):
     heatmap_data['mortalidad'] = heatmap_data['mortalidad'].fillna(0).round(4)
     
     # Convertir a una lista de diccionarios
-    return heatmap_data.to_dict(orient='records')
+    return clean_df_for_json(heatmap_data)
 
 @app.get("/api/teachers")
-def get_teachers(semestre: str = None):
+def get_teachers(semestre: str = None, materia: str = None):
     df = get_master_data()
     
     if semestre:
         df = df[df['semester'] == semestre]
+        
+    if materia:
+        df = df[df['subject_name'] == materia]
         
     df_teachers_stats = df.dropna(subset=['teacher_name'])
     docentes_stats = df_teachers_stats.groupby('teacher_name').agg(
@@ -161,10 +204,129 @@ def get_teachers(semestre: str = None):
         tasa_mortalidad=('mortalidad', 'mean')
     ).reset_index()
     
-    # Mínimo 40 estudiantes evaluados por docente
-    docentes_stats = docentes_stats[docentes_stats['total_estudiantes'] >= 40]
+    # Mínimo 20 estudiantes evaluados por docente si hay filtro de materia, sino 40
+    min_est = 20 if materia else 40
+    docentes_stats = docentes_stats[docentes_stats['total_estudiantes'] >= min_est]
     
     top_docentes = docentes_stats.sort_values(by='tasa_mortalidad', ascending=False).head(15)
     top_docentes['tasa_mortalidad'] = top_docentes['tasa_mortalidad'].round(4)
     
-    return top_docentes.to_dict(orient='records')
+    return clean_df_for_json(top_docentes)
+
+@app.get("/api/adaptacion")
+def get_adaptacion(semestre: str = None):
+    df = get_excel_data()
+    
+    if semestre and 'semester' in df.columns:
+        df = df[df['semester'] == semestre]
+        
+    if 'antigüedad' in df.columns:
+        # Limpieza estricta de la columna antigüedad
+        df_clean = df.copy()
+        df_clean['semestre'] = pd.to_numeric(df_clean['antigüedad'], errors='coerce')
+        df_clean = df_clean.dropna(subset=['semestre'])
+        
+        df_curva = df_clean[(df_clean['semestre'] >= 1) & (df_clean['semestre'] <= 10)]
+        
+        curva_stats = df_curva.groupby('semestre').agg(
+            mortalidad=('mortalidad', 'mean')
+        ).reset_index()
+        
+        curva_stats['mortalidad'] = curva_stats['mortalidad'].fillna(0).astype(float).round(4)
+        curva_stats['semestre'] = curva_stats['semestre'].astype(int)
+        
+        datos_json = clean_df_for_json(curva_stats)
+        print("📊 Datos Curva:", datos_json)
+        return datos_json
+    return []
+
+@app.get("/api/brecha-ciencias")
+def get_brecha_ciencias(semestre: str = None):
+    df = get_excel_data()
+    
+    if semestre and 'semester' in df.columns:
+        df = df[df['semester'] == semestre]
+        
+    if 'asignatura' in df.columns and 'sexo' in df.columns:
+        materias_duras = df[df['asignatura'].str.contains('CALCULO|FISICA|ALGEBRA|PROGRAMACION', case=False, na=False)]
+        
+        if not materias_duras.empty:
+            brecha_stats = materias_duras.groupby('sexo').agg(
+                total_estudiantes=('mortalidad', 'count'),
+                tasa_mortalidad=('mortalidad', 'mean')
+            ).reset_index()
+            
+            brecha_stats['tasa_mortalidad'] = brecha_stats['tasa_mortalidad'].fillna(0).astype(float).round(4)
+            return clean_df_for_json(brecha_stats)
+    return []
+
+@app.get("/api/materias-filtro")
+def get_materias_filtro(semestre: str = None):
+    df = get_excel_data()
+    if semestre:
+        df = df[df['semester'] == semestre]
+    
+    # Filtramos materias que no son de carga académica normal
+    df_materias = df[~df['asignatura'].str.contains('NIVELATORIO|GRADO|PRACTICA', case=False, na=False)]
+    
+    materias_stats = df_materias.groupby('asignatura').agg(
+        total_estudiantes=('mortalidad', 'count'),
+        tasa_mortalidad=('mortalidad', 'mean')
+    ).reset_index()
+    
+    materias_stats = materias_stats[materias_stats['total_estudiantes'] >= 30]
+    top_filtros = materias_stats.sort_values(by='tasa_mortalidad', ascending=False).head(10)
+    top_filtros['tasa_mortalidad'] = top_filtros['tasa_mortalidad'].astype(float).round(4)
+    
+    return clean_df_for_json(top_filtros)
+
+@app.get("/api/sedes")
+def get_sedes(semestre: str = None):
+    df = get_excel_data()
+    if semestre:
+        df = df[df['semester'] == semestre]
+        
+    if 'sede' in df.columns:
+        sede_stats = df.groupby('sede').agg(
+            total_estudiantes=('mortalidad', 'count'),
+            tasa_mortalidad=('mortalidad', 'mean')
+        ).reset_index()
+        
+        sede_stats = sede_stats[sede_stats['total_estudiantes'] >= 50]
+        sede_stats = sede_stats.sort_values(by='tasa_mortalidad', ascending=False)
+        sede_stats['tasa_mortalidad'] = sede_stats['tasa_mortalidad'].astype(float).round(4)
+        
+        return clean_df_for_json(sede_stats)
+    return []
+
+@app.get("/api/jornada")
+def get_jornada(semestre: str = None):
+    df = get_excel_data()
+    if semestre:
+        df = df[df['semester'] == semestre]
+        
+    if 'jornada' in df.columns:
+        jornada_stats = df.groupby('jornada').agg(
+            total_estudiantes=('mortalidad', 'count'),
+            tasa_mortalidad=('mortalidad', 'mean')
+        ).reset_index()
+        
+        jornada_stats['tasa_mortalidad'] = jornada_stats['tasa_mortalidad'].astype(float).round(4)
+        
+        return clean_df_for_json(jornada_stats)
+    return []
+
+@app.get("/api/materias-list")
+def get_materias_list():
+    df = get_master_data()
+    materias = sorted(df['subject_name'].dropna().unique().tolist())
+    return materias
+
+# Servir el Frontend (index.html) en la ruta raíz
+@app.get("/")
+def read_index():
+    return FileResponse('public/index.html')
+
+# Montar la carpeta public para servir main.js y assets
+# Se monta al final para no interferir con las rutas /api
+app.mount("/", StaticFiles(directory="public"), name="public")
