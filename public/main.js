@@ -318,7 +318,7 @@ document.addEventListener('DOMContentLoaded', () => {
         jornadaChart.resize();
     });
 
-    const API_BASE = '/api';
+    const API_BASE = window.location.origin + '/api';
 
     // Función para actualizar datos
     async function loadData(semestre) {
