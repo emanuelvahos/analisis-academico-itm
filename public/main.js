@@ -62,8 +62,14 @@ async function loadData(semestre) {
             series: [{ data: teacherValues }],
             tooltip: {
                 formatter: function (params) {
-                    const original = teachersRaw[params.dataIndex];
-                    return `<strong>${original.teacher_name}</strong><br/>Mortalidad: ${(params.value * 100).toFixed(1)}%<br/>Total Estudiantes: ${original.total_estudiantes}`;
+                    const p = Array.isArray(params) ? params[0] : params;
+                    const original = teachersRaw[p.dataIndex];
+                    const tasa = p.value;
+                    const total = original.total_estudiantes;
+                    const afectados = Math.round(tasa * total);
+                    return `<strong>${original.teacher_name}</strong><br/>
+                            Mortalidad: ${(tasa * 100).toFixed(1)}%<br/>
+                            ⚠️ <b>${afectados}</b> reprobados de <b>${total}</b> evaluados`;
                 }
             }
         });
@@ -89,8 +95,14 @@ async function loadData(semestre) {
             series: [{ data: brechaRaw.map(item => item.tasa_mortalidad) }],
             tooltip: {
                 formatter: function (params) {
-                    const original = brechaRaw[params.dataIndex];
-                    return `<strong>${original.sexo}</strong><br/>Mortalidad: ${(params.value * 100).toFixed(1)}%<br/>Total Estudiantes: ${original.total_estudiantes}`;
+                    const p = Array.isArray(params) ? params[0] : params;
+                    const original = brechaRaw[p.dataIndex];
+                    const tasa = p.value;
+                    const total = original.total_estudiantes;
+                    const afectados = Math.round(tasa * total);
+                    return `<strong>Género: ${original.sexo}</strong><br/>
+                            Mortalidad: ${(tasa * 100).toFixed(1)}%<br/>
+                            ⚠️ <b>${afectados}</b> reprobados de <b>${total}</b> evaluados`;
                 }
             }
         });
@@ -104,8 +116,14 @@ async function loadData(semestre) {
             series: [{ data: materiasRaw.map(m => m.tasa_mortalidad) }],
             tooltip: {
                 formatter: function (params) {
-                    const original = materiasRaw[params.dataIndex];
-                    return `<strong>${original.asignatura}</strong><br/>Mortalidad: ${(params.value * 100).toFixed(1)}%<br/>Total Estudiantes: ${original.total_estudiantes}`;
+                    const p = Array.isArray(params) ? params[0] : params;
+                    const original = materiasRaw[p.dataIndex];
+                    const tasa = p.value;
+                    const total = original.total_estudiantes;
+                    const afectados = Math.round(tasa * total);
+                    return `<strong>${original.asignatura}</strong><br/>
+                            Mortalidad: ${(tasa * 100).toFixed(1)}%<br/>
+                            ⚠️ <b>${afectados}</b> reprobados de <b>${total}</b> evaluados`;
                 }
             }
         });
@@ -118,8 +136,14 @@ async function loadData(semestre) {
             series: [{ data: sedesRaw.map(s => s.tasa_mortalidad) }],
             tooltip: {
                 formatter: function (params) {
-                    const original = sedesRaw[params.dataIndex];
-                    return `<strong>${original.sede}</strong><br/>Mortalidad: ${(params.value * 100).toFixed(1)}%<br/>Total Estudiantes: ${original.total_estudiantes}`;
+                    const p = Array.isArray(params) ? params[0] : params;
+                    const original = sedesRaw[p.dataIndex];
+                    const tasa = p.value;
+                    const total = original.total_estudiantes;
+                    const afectados = Math.round(tasa * total);
+                    return `<strong>Sede: ${original.sede}</strong><br/>
+                            Mortalidad: ${(tasa * 100).toFixed(1)}%<br/>
+                            ⚠️ <b>${afectados}</b> reprobados de <b>${total}</b> evaluados`;
                 }
             }
         });
@@ -190,95 +214,65 @@ async function loadData(semestre) {
 }
 
 // Función dedicada para el Mapa de Calor (GeoJSON)
-async function renderMapaCalor() {
-    if (!chartMapaCalor) return;
-    chartMapaCalor.showLoading();
+function renderMapaCalor() {
+    const chartMapaCalor = echarts.getInstanceByDom(document.getElementById('chart-mapa-calor')) || echarts.init(document.getElementById('chart-mapa-calor'));
 
-    // 1. Primero cargamos y registramos el mapa (solo si no está registrado)
-    if (!echarts.getMap('medellin_barrios')) {
-        fetch('Barrios y veredas de Medellín.geojson')
-            .then(response => response.json())
+    chartMapaCalor.showLoading({ text: 'Cargando mapa de Medellín...' });
+
+    // 1. Verificar si el mapa ya está registrado
+    if (!echarts.getMap('medellin')) {
+        fetch('./medellin.geojson')
+            .then(response => {
+                if (!response.ok) throw new Error("No se encontró medellin.geojson (Error 404)");
+                return response.json();
+            })
             .then(geojsonData => {
-                echarts.registerMap('medellin_barrios', geojsonData);
-                geojsonLoaded = true;
-                cargarDatosYRenderizarCalor();
+                // Imprimir en consola para descubrir la propiedad del nombre
+                console.log("Propiedades del primer barrio:", geojsonData.features[0].properties);
+
+                echarts.registerMap('medellin', geojsonData);
+                cargarDatosGeoJSON(chartMapaCalor);
             })
             .catch(error => {
-                console.error("Error cargando GeoJSON:", error);
+                console.error("Fallo crítico en GeoJSON:", error);
                 chartMapaCalor.hideLoading();
             });
     } else {
-        cargarDatosYRenderizarCalor();
+        cargarDatosGeoJSON(chartMapaCalor);
     }
 }
 
-async function cargarDatosYRenderizarCalor() {
-    try {
-        const dataRes = await fetch(`${API_BASE}/mapa-poligonos?semestre=${currentSemestre}&metrica=${currentMetrica}`);
-        const data = await dataRes.json();
-
-        let minVal = 0;
-        let maxVal = 100;
-        if (data.length > 0) {
-            const values = data.map(d => d.value);
-            minVal = Math.min(...values);
-            maxVal = Math.max(...values);
-        }
-
-        let inRangeColors = ['#ffeda0', '#feb24c', '#f03b20'];
-        if (currentMetrica === 'aprobacion') {
-            inRangeColors = ['#f03b20', '#ffeda0', '#31a354'];
-        }
-
-        chartMapaCalor.setOption({
-            tooltip: {
-                trigger: 'item',
-                formatter: function (params) {
-                    let val = params.value;
-                    if (isNaN(val)) val = "Sin datos";
-                    else if (currentMetrica !== 'poblacion') val = val + '%';
-                    
-                    let metricLabel = 'Estudiantes';
-                    if (currentMetrica === 'aprobacion') metricLabel = 'Aprobación';
-                    if (currentMetrica === 'riesgo') metricLabel = 'Riesgo (Mortalidad)';
-                    
-                    return `<strong>${params.name}</strong><br/>${metricLabel}: ${val}`;
-                }
-            },
-            visualMap: {
-                min: minVal,
-                max: maxVal,
-                text: ['Alto', 'Bajo'],
-                realtime: false,
-                calculable: true,
-                inRange: { color: inRangeColors },
-                left: 'right',
-                bottom: '10%'
-            },
-            series: [
-                {
-                    name: 'Barrios Medellín',
+function cargarDatosGeoJSON(chartInstance) {
+    fetch(`/api/mapa-poligonos?semestre=${currentSemestre}&metrica=${currentMetrica}`)
+        .then(res => res.json())
+        .then(datosDelBackend => {
+            chartInstance.hideLoading();
+            chartInstance.setOption({
+                tooltip: {
+                    trigger: 'item',
+                    formatter: '{b}<br/>Valor: {c}'
+                },
+                visualMap: {
+                    left: 'right',
+                    min: 0,
+                    max: Math.max(...datosDelBackend.map(d => d.value)) || 100,
+                    inRange: { color: ['#fee0d2', '#de2d26'] }, // Colores de calor
+                    text: ['Alto', 'Bajo'],
+                    calculable: true
+                },
+                series: [{
                     type: 'map',
-                    map: 'medellin_barrios',
+                    map: 'medellin',
                     roam: true,
-                    nameProperty: 'NOMBRE', // Prioridad según el GeoJSON oficial
-                    itemStyle: {
-                        borderColor: '#cbd5e1',
-                        borderWidth: 0.5
-                    },
-                    emphasis: {
-                        label: { show: true, color: '#0f172a' },
-                        itemStyle: { areaColor: '#94a3b8' }
-                    },
-                    data: data
-                }
-            ]
+                    nameProperty: 'NOMBRE', // Cambiar a 'Name' o 'Barrio' si la consola lo indica
+                    data: datosDelBackend
+                }]
+            });
+        })
+        .catch(err => {
+            console.error("Error cargando datos del backend para el mapa:", err);
+            chartInstance.hideLoading();
         });
-    } catch (err) {
-        console.error("Error al renderizar datos de calor:", err);
-    } finally {
-        chartMapaCalor.hideLoading();
-    }
 }
 
 // 4. Inicialización al Cargar el DOM
@@ -305,40 +299,41 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     teachersChart.setOption({
-        tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
+        tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' }, backgroundColor: 'rgba(15, 23, 42, 0.9)', textStyle: { color: '#fff' } },
         grid: { left: '3%', right: '10%', bottom: '3%', top: '5%', containLabel: true },
         xAxis: { type: 'value', max: 1, axisLabel: { formatter: v => Math.round(v * 100) + '%' } },
         yAxis: { type: 'category', data: [], axisLabel: { interval: 0, width: 150, overflow: 'truncate' } },
-        series: [{ type: 'bar', data: [], itemStyle: { color: '#dc2626' }, label: { show: true, position: 'right', formatter: p => (p.value * 100).toFixed(1) + '%' } }]
+        series: [{ type: 'bar', data: [], itemStyle: { color: '#dc2626' }, label: { show: true, position: 'right', formatter: p => (p.value * 100).toFixed(1) + '%' }, emphasis: { focus: 'series' } }]
     });
 
     adaptacionChart.setOption({
-        tooltip: { trigger: 'axis' },
+        tooltip: { trigger: 'axis', backgroundColor: 'rgba(15, 23, 42, 0.9)', textStyle: { color: '#fff' } },
         grid: { left: '5%', right: '5%', bottom: '5%', top: '10%', containLabel: true },
         xAxis: { type: 'category', data: [] },
         yAxis: { type: 'value', axisLabel: { formatter: v => Math.round(v * 100) + '%' } },
-        series: [{ type: 'line', smooth: true, symbolSize: 8, itemStyle: { color: '#00B5E2' }, lineStyle: { width: 3 }, label: { show: true, position: 'top', formatter: p => (p.value * 100).toFixed(1) + '%' } }]
+        series: [{ type: 'line', smooth: true, symbolSize: 8, itemStyle: { color: '#00B5E2' }, lineStyle: { width: 3 }, label: { show: true, position: 'top', formatter: p => (p.value * 100).toFixed(1) + '%' }, emphasis: { focus: 'series' } }]
     });
 
     brechaChart.setOption({
-        tooltip: { trigger: 'axis' },
+        tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' }, backgroundColor: 'rgba(15, 23, 42, 0.9)', textStyle: { color: '#fff' } },
         xAxis: { type: 'category', data: [] },
         yAxis: { type: 'value', axisLabel: { formatter: v => Math.round(v * 100) + '%' } },
-        series: [{ type: 'bar', data: [], barWidth: '50%', itemStyle: { color: p => ['#8B5CF6', '#00B5E2', '#10B981', '#F59E0B'][p.dataIndex % 4] }, label: { show: true, position: 'top', formatter: p => (p.value * 100).toFixed(1) + '%' } }]
+        legend: { show: true, bottom: 0, textStyle: { color: '#94a3b8' } },
+        series: [{ type: 'bar', data: [], barWidth: '50%', itemStyle: { color: p => ['#8B5CF6', '#00B5E2', '#10B981', '#F59E0B'][p.dataIndex % 4] }, label: { show: true, position: 'top', formatter: p => (p.value * 100).toFixed(1) + '%' }, emphasis: { focus: 'series' } }]
     });
 
     materiasChart.setOption({
-        tooltip: { trigger: 'axis' },
+        tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' }, backgroundColor: 'rgba(15, 23, 42, 0.9)', textStyle: { color: '#fff' } },
         xAxis: { type: 'value', max: 1, axisLabel: { formatter: v => Math.round(v * 100) + '%' } },
         yAxis: { type: 'category', data: [] },
-        series: [{ type: 'bar', data: [], itemStyle: { color: '#dc2626' }, label: { show: true, position: 'right', formatter: p => (p.value * 100).toFixed(1) + '%' } }]
+        series: [{ type: 'bar', data: [], itemStyle: { color: '#dc2626' }, label: { show: true, position: 'right', formatter: p => (p.value * 100).toFixed(1) + '%' }, emphasis: { focus: 'series' } }]
     });
 
     sedesChart.setOption({
-        tooltip: { trigger: 'axis' },
+        tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' }, backgroundColor: 'rgba(15, 23, 42, 0.9)', textStyle: { color: '#fff' } },
         xAxis: { type: 'category', data: [], axisLabel: { rotate: 30, interval: 0 } },
         yAxis: { type: 'value', max: 1, axisLabel: { formatter: v => Math.round(v * 100) + '%' } },
-        series: [{ type: 'bar', data: [], itemStyle: { color: '#7C3AED' }, label: { show: true, position: 'top', formatter: p => (p.value * 100).toFixed(1) + '%' } }]
+        series: [{ type: 'bar', data: [], itemStyle: { color: '#7C3AED' }, label: { show: true, position: 'top', formatter: p => (p.value * 100).toFixed(1) + '%' }, emphasis: { focus: 'series' } }]
     });
 
     jornadaChart.setOption({
@@ -374,7 +369,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 xAxisIndex: 0,
                 yAxisIndex: 0,
                 zoomOnMouseWheel: true,
-                moveOnMouseMove: true
+                moveOnMouseMove: true,
+                moveOnMouseWheel: false
             }
         ],
         series: [

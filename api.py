@@ -206,7 +206,7 @@ def get_teachers(semestre: str = "2025-2", materia: str = None):
         tasa_mortalidad=('mortalidad', 'mean')
     ).reset_index()
     
-    min_est = 20 if materia else 40
+    min_est = 5 if materia else 40
     docentes_stats = docentes_stats[docentes_stats['total_estudiantes'] >= min_est]
     top_docentes = docentes_stats.sort_values(by='tasa_mortalidad', ascending=False).head(15)
     top_docentes['tasa_mortalidad'] = top_docentes['tasa_mortalidad'].round(4).astype(float)
@@ -342,8 +342,8 @@ def get_mapa_poligonos(semestre: str = "2025-2", metrica: str = 'poblacion'):
     df = GLOBAL_DF_MASTER
     df = df[df['semester'] == semestre].copy()
     
-    # Limpiar columna barrio (Title Case para cruzar con GeoJSON)
-    df['barrio'] = df['barrio'].astype(str).str.title().str.strip()
+    # Limpiar columna barrio (UPPER CASE para cruzar con GeoJSON oficial)
+    df['barrio'] = df['barrio'].astype(str).str.upper().str.strip()
     
     # Lógica de cálculo según la métrica
     if metrica == 'poblacion':
