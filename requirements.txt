@@ -14,4 +14,4 @@ statsmodels
 #.\venv\Scripts\activate
 #python scripts/analisis_sociodemografico.py
 #pip install -r requirements.txt
-#python -m http.server 8000
+#uvicorn api:app --reload

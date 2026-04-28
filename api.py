@@ -15,6 +15,28 @@ load_dotenv()
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
 
+# --- COORDENADAS MEDELLÍN (Commute Map Dinámico) ---
+try:
+    # Carga del CSV oficial de barrios y veredas
+    df_coords_csv = pd.read_csv('Barrios y veredas de Medellín.csv')
+    COORDS_CSV = {str(row['Name']).lower().strip(): [row['Longitude'], row['Latitude']] for _, row in df_coords_csv.iterrows()}
+except Exception as e:
+    print(f"Error cargando CSV de coordenadas: {e}")
+    COORDS_CSV = {}
+
+# Inyección de Sedes ITM y alias comunes
+COORDS_SEDES = {
+    'robledo': [-75.594, 6.273],
+    'fraternidad': [-75.556, 6.246],
+    'fraternidad medellín': [-75.556, 6.246],
+    'frat. medellín': [-75.556, 6.246],
+    'castilla': [-75.570, 6.295],
+    'floresta': [-75.590, 6.258]
+}
+
+# Diccionario maestro unificado (Prioridad a sedes si hay colisión)
+COORDS_SAFE = {**COORDS_CSV, **COORDS_SEDES}
+
 app = FastAPI(title="API Dashboard ITM")
 
 # Configurar CORS
@@ -26,10 +48,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- CONFIGURACIÓN DE MEMORIA (DIETA PANDAS) ---
-
+# --- CLIENTE SUPABASE ---
 def get_supabase_client() -> Client:
     return create_client(SUPABASE_URL, SUPABASE_KEY)
+
+# --- CARGA DE DATOS DESDE SUPABASE ---
 
 def fetch_table(table_name: str, columns: str = "*") -> pd.DataFrame:
     supabase = get_supabase_client()
@@ -44,92 +67,87 @@ def fetch_table(table_name: str, columns: str = "*") -> pd.DataFrame:
         start += page_size
     
     df = pd.DataFrame(all_data)
-    # Optimización inmediata: Categorías y tipos reducidos
+    # Optimización inmediata: Categorías
     for col in df.select_dtypes(include=['object']).columns:
         df[col] = df[col].astype('category')
     return df
 
-def load_all_data():
-    print("🚀 [MEM] Iniciando carga optimizada de datos...")
+def load_data_from_supabase():
+    print("[SUPABASE] Iniciando reconstruccion relacional en RAM...")
     
-    # REGLA A: Columnas estrictas (Selective Columns)
-    excel_cols = ['Año', 'Semestre', 'Sexo', 'Sede', 'Asignatura', 'Hora Inicial', 'Definitiva', 'Antiguedad']
-    
-    print("📥 Cargando Excel maestro (RAM Diet)...")
-    df_ex = pd.read_excel("Desarrollo Curricular SIGA Semestre (1).xlsx", usecols=excel_cols)
-    
-    # Normalizar nombres
-    df_ex.columns = df_ex.columns.str.strip().str.lower().str.replace(' ', '_').str.replace('antiguedad', 'antigüedad').str.replace('año', 'año')
-    # Nota: pandas lower() no quita tildes, pero el user lo pedía así. 
-    # El archivo dice 'Ao', pandas suele leerlo como 'Año' si el encoding es correcto.
-    if 'año' not in df_ex.columns and 'ao' in df_ex.columns:
-        df_ex = df_ex.rename(columns={'ao': 'año'})
+    # 1. Descargar tablas
+    df_perf = fetch_table("academic_performance").rename(columns={'id': 'performance_id'})
+    df_groups = fetch_table("class_groups").rename(columns={'id': 'group_id'})
+    df_subjects = fetch_table("subjects").rename(columns={'id': 'subject_id', 'name': 'subject_name'})
+    df_teachers = fetch_table("teachers").rename(columns={'id': 'teacher_id', 'full_name': 'teacher_name'})
+    df_programs = fetch_table("academic_programs").rename(columns={'id': 'program_id', 'name': 'program_name'})
+    df_sched = fetch_table("group_schedules").rename(columns={'id': 'schedule_id'})
 
-    # REGLA C: Tipos numéricos reducidos (float32)
-    if 'definitiva' in df_ex.columns:
-        df_ex['definitiva_num'] = pd.to_numeric(df_ex['definitiva'].astype(str).str.replace(',', '.'), errors='coerce').fillna(0).astype(np.float32)
-        df_ex['mortalidad'] = (df_ex['definitiva_num'] < 3.0).astype(np.uint8)
-    
-    df_ex['semester'] = df_ex['año'].astype(str).str.replace('.0', '', regex=False) + '-' + df_ex['semestre'].astype(str).str.replace('.0', '', regex=False)
-    
-    if 'hora_inicial' in df_ex.columns:
-        df_ex['hora_inicial_num'] = pd.to_numeric(df_ex['hora_inicial'], errors='coerce').astype(np.float32)
-        df_ex['hora_real'] = df_ex['hora_inicial_num'].apply(lambda x: x + 12 if pd.notnull(x) and x <= 5 else x).astype(np.float32)
-        df_ex['jornada'] = df_ex['hora_real'].apply(lambda x: 'Nocturna (18:00 - 22:00)' if x >= 18 else 'Diurna (06:00 - 17:59)')
+    # Modificaciones solicitadas por el usuario:
+    df_students = fetch_table("students").rename(columns={'id': 'student_id'})
+    df_campuses = fetch_table("campuses").rename(columns={'id': 'campus_id', 'name': 'sede_name'})
 
-    # REGLA B: Categorías para texto
-    for col in df_ex.select_dtypes(include=['object']).columns:
-        df_ex[col] = df_ex[col].astype('category')
+    # --- LIMPIEZA DE METADATOS PARA EVITAR COLISIONES EN MERGES ---
+    # Eliminamos tenant_id y created_at de todas las tablas excepto la principal si fuera necesario
+    # Pero para el dashboard no los necesitamos en RAM.
+    metadata_cols = ['tenant_id', 'created_at']
+    dfs_to_clean = [df_perf, df_groups, df_subjects, df_teachers, df_programs, df_sched, df_students, df_campuses]
+    
+    for _df in dfs_to_clean:
+        cols_to_drop = [c for c in metadata_cols if c in _df.columns]
+        if cols_to_drop:
+            _df.drop(columns=cols_to_drop, inplace=True)
 
-    # 2. Cargar Supabase con columnas seleccionadas
-    print("📥 Cargando datos desde Supabase (Selective Fetch)...")
-    df_perf = fetch_table("academic_performance", "final_grade, group_id")
-    df_groups = fetch_table("class_groups", "id, subject_id, teacher_id, semester").rename(columns={'id': 'group_id'})
-    df_sched = fetch_table("group_schedules", "group_id, start_time, day_of_week")
-    df_subjects = fetch_table("subjects", "id, name").rename(columns={'id': 'subject_id', 'name': 'subject_name'})
-    df_teachers = fetch_table("teachers", "id, full_name").rename(columns={'id': 'teacher_id', 'full_name': 'teacher_name'})
+    print("[DATA] Mezclando datos relacionales...")
     
-    print("🔄 Cruzando tablas (Merge & Clean)...")
-    df_ma = df_perf.merge(df_groups, on='group_id', how='inner')
-    del df_perf, df_groups # Liberar RAM
+    # Grain: Estudiante-Grupo (Performance)
+    df = df_perf.merge(df_groups, on='group_id', how='inner')
+    df = df.merge(df_subjects, on='subject_id', how='left')
+    df = df.merge(df_teachers, on='teacher_id', how='left')
     
-    df_ma = df_ma.merge(df_sched, on='group_id', how='left')
-    del df_sched
-    
-    df_ma = df_ma.merge(df_subjects, on='subject_id', how='left')
-    del df_subjects
-    
-    df_ma = df_ma.merge(df_teachers, on='teacher_id', how='left')
-    del df_teachers
-    
+    # Añadir cruces solicitados (y mantener los necesarios de students para kpis como gender, antiguedad, etc.)
+    df = df.merge(df_students[['student_id', 'comuna', 'barrio', 'stratum', 'gender', 'antiguedad', 'campus_id', 'program_id']], on='student_id', how='left')
+    df = df.merge(df_programs, on='program_id', how='left')
+    df = df.merge(df_campuses[['campus_id', 'sede_name']], on='campus_id', how='left')
+
+    # Renombramos temporalmente sede_name a campus_name para no quebrar otras gráficas que usen campus_name
+    df['campus_name'] = df['sede_name']
+
+    # Limpieza de memoria intermedia
+    del df_perf, df_groups, df_subjects, df_teachers, df_students, df_programs, df_campuses
     gc.collect()
 
-    # Procesamiento Master
-    df_ma['final_grade'] = pd.to_numeric(df_ma['final_grade'], errors='coerce').astype(np.float32)
-    df_ma['mortalidad'] = (df_ma['final_grade'] < 3.0).astype(np.uint8)
+    # Procesamiento Master (Grain: Estudiante-Grupo)
+    df['final_grade'] = pd.to_numeric(df['final_grade'], errors='coerce').astype(np.float32)
+    df['mortalidad'] = (df['final_grade'] < 3.0).astype(np.uint8)
     
-    df_ma['hora_cruda'] = pd.to_datetime(df_ma['start_time'], format='%H:%M:%S', errors='coerce').dt.hour
-    df_ma['hora_real'] = df_ma['hora_cruda'].apply(lambda x: x + 12 if pd.notnull(x) and x <= 5 else x).astype(np.float32)
+    # REGLA B: Categorías para texto
+    for col in df.select_dtypes(include=['object']).columns:
+        df[col] = df[col].astype('category')
+
+    # Reconstrucción para Heatmap (Grain: Estudiante-Grupo-Horario)
+    df_h = df.merge(df_sched, on='group_id', how='left')
+    del df_sched
+    gc.collect()
+
+    df_h['hora_cruda'] = pd.to_datetime(df_h['start_time'], format='%H:%M:%S', errors='coerce').dt.hour
+    df_h['hora_real'] = df_h['hora_cruda'].apply(lambda x: x + 12 if pd.notnull(x) and x <= 5 else x).astype(np.float32)
     
     limites = [6, 8, 10, 12, 14, 16, 18, 20, 22]
     etiquetas = ['06:00-08:00', '08:00-10:00', '10:00-12:00', '12:00-14:00', '14:00-16:00', '16:00-18:00', '18:00-20:00', '20:00-22:00']
-    df_ma['franja_horaria'] = pd.cut(df_ma['hora_real'], bins=limites, labels=etiquetas, right=False).astype('category')
+    df_h['franja_horaria'] = pd.cut(df_h['hora_real'], bins=limites, labels=etiquetas, right=False).astype('category')
     
     dias_semana = {1: 'Lunes', 2: 'Martes', 3: 'Miércoles', 4: 'Jueves', 5: 'Viernes', 6: 'Sábado'}
-    df_ma['dia_nombre'] = df_ma['day_of_week'].map(dias_semana).astype('category')
-    
-    # REGLA B para el Master también
-    for col in df_ma.select_dtypes(include=['object']).columns:
-        df_ma[col] = df_ma[col].astype('category')
+    df_h['dia_nombre'] = df_h['day_of_week'].map(dias_semana).astype('category')
 
-    print("✅ [MEM] Carga completada. RAM optimizada.")
-    return df_ex, df_ma
+    print("[RAM] Datos cargados exitosamente desde Supabase.")
+    return df, df_h
 
-# Carga inicial
-GLOBAL_DF_EXCEL, GLOBAL_DF_MASTER = load_all_data()
+# Carga global al inicio
+GLOBAL_DF_MASTER, GLOBAL_DF_HEATMAP = load_data_from_supabase()
 
-# --- OPTIMIZACIÓN DE KPIs FIJOS ---
-print("📊 Pre-calculando KPIs estáticos por semestre...")
+# --- OPTIMIZACIÓN DE KPIs ---
+print("[KPI] Pre-calculando KPIs estaticos por semestre...")
 STATIC_KPI_CACHE = {}
 all_semesters = GLOBAL_DF_MASTER['semester'].unique()
 
@@ -138,7 +156,6 @@ for sem in all_semesters:
     m_global = round(float(df_s['mortalidad'].mean() * 100), 1) if not df_s.empty else 0.0
     t_est = int(len(df_s))
     
-    # Asignatura crítica
     df_mat = df_s[~df_s['subject_name'].str.contains('NIVELATORIO|GRADO|PRACTICA', case=False, na=False)]
     m_stats = df_mat.groupby('subject_name', observed=True).agg(
         total_est=('mortalidad', 'count'),
@@ -159,31 +176,29 @@ for sem in all_semesters:
     }
 
 def clean_df_for_json(df):
-    # Ya están optimizados, solo convertir a nativos para JSON
     return df.replace({np.nan: None}).to_dict(orient='records')
 
 # --- ENDPOINTS ---
 
 @app.get("/api/kpis")
-def get_kpis(semestre: str = None):
+def get_kpis(semestre: str = "2025-2"):
     if semestre in STATIC_KPI_CACHE:
         return STATIC_KPI_CACHE[semestre]
-    # Fallback si no está pre-calculado
     return {"mortalidad_global": 0.0, "total_estudiantes": 0, "asignatura_critica": {"nombre": "N/A", "porcentaje": 0.0}}
 
 @app.get("/api/heatmap")
-def get_heatmap(semestre: str = None):
-    df = GLOBAL_DF_MASTER
-    if semestre: df = df[df['semester'] == semestre]
+def get_heatmap(semestre: str = "2025-2"):
+    df = GLOBAL_DF_HEATMAP
+    df = df[df['semester'] == semestre]
     
     heatmap_data = df.groupby(['franja_horaria', 'dia_nombre'], observed=True)['mortalidad'].mean().reset_index()
     heatmap_data['mortalidad'] = heatmap_data['mortalidad'].fillna(0).round(4).astype(float)
     return clean_df_for_json(heatmap_data[['franja_horaria', 'dia_nombre', 'mortalidad']])
 
 @app.get("/api/teachers")
-def get_teachers(semestre: str = None, materia: str = None):
+def get_teachers(semestre: str = "2025-2", materia: str = None):
     df = GLOBAL_DF_MASTER
-    if semestre: df = df[df['semester'] == semestre]
+    df = df[df['semester'] == semestre]
     if materia: df = df[df['subject_name'] == materia]
         
     docentes_stats = df.groupby('teacher_name', observed=True).agg(
@@ -198,43 +213,42 @@ def get_teachers(semestre: str = None, materia: str = None):
     return clean_df_for_json(top_docentes[['teacher_name', 'total_estudiantes', 'tasa_mortalidad']])
 
 @app.get("/api/adaptacion")
-def get_adaptacion(semestre: str = None):
-    df = GLOBAL_DF_EXCEL
-    if semestre: df = df[df['semester'] == semestre]
+def get_adaptacion(semestre: str = "2025-2"):
+    df = GLOBAL_DF_MASTER
+    df = df[df['semester'] == semestre]
     
-    if 'antigüedad' in df.columns:
-        df_curva = df.copy()
-        df_curva['semestre_val'] = pd.to_numeric(df_curva['antigüedad'], errors='coerce')
-        df_curva = df_curva[(df_curva['semestre_val'] >= 1) & (df_curva['semestre_val'] <= 10)]
-        
-        curva_stats = df_curva.groupby('semestre_val', observed=True).agg(mortalidad=('mortalidad', 'mean')).reset_index()
+    # En el modelo relacional, antiguedad es texto (Nuevo, Antiguo, etc.)
+    # Si queremos una curva por semestres, necesitaríamos que los estudiantes tuvieran ese dato numérico.
+    # Por ahora, mostramos la mortalidad por categoría de antigüedad disponible.
+    if 'antiguedad' in df.columns:
+        curva_stats = df.groupby('antiguedad', observed=True).agg(mortalidad=('mortalidad', 'mean')).reset_index()
         curva_stats['mortalidad'] = curva_stats['mortalidad'].round(4).astype(float)
-        curva_stats = curva_stats.rename(columns={'semestre_val': 'semestre'})
+        curva_stats = curva_stats.rename(columns={'antiguedad': 'semestre'})
         return clean_df_for_json(curva_stats)
     return []
 
 @app.get("/api/brecha-ciencias")
-def get_brecha_ciencias(semestre: str = None):
-    df = GLOBAL_DF_EXCEL
-    if semestre: df = df[df['semester'] == semestre]
+def get_brecha_ciencias(semestre: str = "2025-2"):
+    df = GLOBAL_DF_MASTER
+    df = df[df['semester'] == semestre]
     
-    materias_duras = df[df['asignatura'].str.contains('CALCULO|FISICA|ALGEBRA|PROGRAMACION', case=False, na=False)]
+    materias_duras = df[df['subject_name'].str.contains('CÁLCULO|FISICA|ALGEBRA|PROGRAMACIÓN|CALCULO', case=False, na=False)]
     if not materias_duras.empty:
-        brecha_stats = materias_duras.groupby('sexo', observed=True).agg(
+        brecha_stats = materias_duras.groupby('gender', observed=True).agg(
             total_estudiantes=('mortalidad', 'count'),
             tasa_mortalidad=('mortalidad', 'mean')
         ).reset_index()
         brecha_stats['tasa_mortalidad'] = brecha_stats['tasa_mortalidad'].round(4).astype(float)
-        return clean_df_for_json(brecha_stats)
+        return clean_df_for_json(brecha_stats.rename(columns={'gender': 'sexo'}))
     return []
 
 @app.get("/api/materias-filtro")
-def get_materias_filtro(semestre: str = None):
-    df = GLOBAL_DF_EXCEL
-    if semestre: df = df[df['semester'] == semestre]
+def get_materias_filtro(semestre: str = "2025-2"):
+    df = GLOBAL_DF_MASTER
+    df = df[df['semester'] == semestre]
     
-    df_mat = df[~df['asignatura'].str.contains('NIVELATORIO|GRADO|PRACTICA', case=False, na=False)]
-    stats = df_mat.groupby('asignatura', observed=True).agg(
+    df_mat = df[~df['subject_name'].str.contains('NIVELATORIO|GRADO|PRACTICA', case=False, na=False)]
+    stats = df_mat.groupby('subject_name', observed=True).agg(
         total_estudiantes=('mortalidad', 'count'),
         tasa_mortalidad=('mortalidad', 'mean')
     ).reset_index()
@@ -242,26 +256,30 @@ def get_materias_filtro(semestre: str = None):
     stats = stats[stats['total_estudiantes'] >= 30]
     top = stats.sort_values(by='tasa_mortalidad', ascending=False).head(10)
     top['tasa_mortalidad'] = top['tasa_mortalidad'].round(4).astype(float)
-    return clean_df_for_json(top)
+    return clean_df_for_json(top.rename(columns={'subject_name': 'asignatura'}))
 
 @app.get("/api/sedes")
-def get_sedes(semestre: str = None):
-    df = GLOBAL_DF_EXCEL
-    if semestre: df = df[df['semester'] == semestre]
+def get_sedes(semestre: str = "2025-2"):
+    df = GLOBAL_DF_MASTER
+    df = df[df['semester'] == semestre]
     
-    stats = df.groupby('sede', observed=True).agg(
+    stats = df.groupby('campus_name', observed=True).agg(
         total_estudiantes=('mortalidad', 'count'),
         tasa_mortalidad=('mortalidad', 'mean')
     ).reset_index()
     stats = stats[stats['total_estudiantes'] >= 50]
     stats = stats.sort_values(by='tasa_mortalidad', ascending=False)
     stats['tasa_mortalidad'] = stats['tasa_mortalidad'].round(4).astype(float)
-    return clean_df_for_json(stats)
+    return clean_df_for_json(stats.rename(columns={'campus_name': 'sede'}))
 
 @app.get("/api/jornada")
-def get_jornada(semestre: str = None):
-    df = GLOBAL_DF_EXCEL
-    if semestre: df = df[df['semester'] == semestre]
+def get_jornada(semestre: str = "2025-2"):
+    # La jornada depende del horario, usamos el grain de heatmap
+    df = GLOBAL_DF_HEATMAP
+    df = df[df['semester'] == semestre]
+    
+    # Recalcular jornada si no existe
+    df['jornada'] = df['hora_real'].apply(lambda x: 'Nocturna (18:00 - 22:00)' if x >= 18 else 'Diurna (06:00 - 17:59)')
     
     stats = df.groupby('jornada', observed=True).agg(
         total_estudiantes=('mortalidad', 'count'),
@@ -269,6 +287,87 @@ def get_jornada(semestre: str = None):
     ).reset_index()
     stats['tasa_mortalidad'] = stats['tasa_mortalidad'].round(4).astype(float)
     return clean_df_for_json(stats)
+
+@app.get("/api/rutas-transporte")
+def get_rutas_transporte(semestre: str = "2025-2"):
+    df = GLOBAL_DF_MASTER
+    df = df[df['semester'] == semestre]
+    
+    # Agrupar por BARRIO de residencia y sede de estudio para mayor precisión
+    # Incluimos la comuna para tener un plan B de mapeo
+    rutas = df.groupby(['barrio', 'sede_name', 'comuna'], observed=True).size().reset_index(name='cantidad')
+    
+    # Filtrar cantidad > 2 (al ser barrios, el grano es más fino)
+    rutas = rutas[rutas['cantidad'] > 2]
+
+    # Normalización para el match
+    rutas['barrio_norm'] = rutas['barrio'].astype(str).str.lower().str.strip()
+    rutas['comuna_norm'] = rutas['comuna'].astype(str).str.lower().str.strip()
+    rutas['destino_norm'] = rutas['sede_name'].astype(str).str.lower().str.strip()
+    
+    # 1. Intentar cruzar por BARRIO
+    rutas['origen_coords'] = rutas['barrio_norm'].map(COORDS_SAFE)
+    
+    # 2. Plan B: Si falló el barrio, intentar por COMUNA
+    mask_retry = rutas['origen_coords'].isna()
+    rutas.loc[mask_retry, 'origen_coords'] = rutas.loc[mask_retry, 'comuna_norm'].map(COORDS_SAFE)
+    
+    # 3. Plan C: Si sigue fallando, intentar con el sufijo _comuna (compatibilidad con dict anterior)
+    mask_retry_2 = rutas['origen_coords'].isna()
+    rutas.loc[mask_retry_2, 'origen_coords'] = (rutas.loc[mask_retry_2, 'comuna_norm'] + "_comuna").map(COORDS_SAFE)
+    
+    # Mapear Destino (Sede)
+    rutas['destino_coords'] = rutas['destino_norm'].map(COORDS_SAFE)
+    
+    # Eliminar los que no cruzaron (NaN en coordenadas)
+    df_limpio = rutas.dropna(subset=['origen_coords', 'destino_coords'])
+    
+    result = []
+    for _, row in df_limpio.iterrows():
+        # Usamos el nombre del barrio como origen principal
+        origen_display = str(row['barrio']).title() if pd.notnull(row['barrio']) else str(row['comuna']).title()
+        
+        result.append({
+            "coords": [row['origen_coords'], row['destino_coords']],
+            "value": int(row['cantidad']),
+            "origen": origen_display,
+            "destino": str(row['sede_name']).title()
+        })
+    
+    print(f"DEBUG: Rutas (BARRIOS) mapeadas: {len(result)} con éxito")
+    return result
+
+@app.get("/api/mapa-poligonos")
+def get_mapa_poligonos(semestre: str = "2025-2", metrica: str = 'poblacion'):
+    df = GLOBAL_DF_MASTER
+    df = df[df['semester'] == semestre].copy()
+    
+    # Limpiar columna barrio (Title Case para cruzar con GeoJSON)
+    df['barrio'] = df['barrio'].astype(str).str.title().str.strip()
+    
+    # Lógica de cálculo según la métrica
+    if metrica == 'poblacion':
+        # Conteo de estudiantes únicos
+        res = df.groupby('barrio', observed=True)['student_id'].nunique().reset_index(name='value')
+    elif metrica == 'aprobacion':
+        # Porcentaje de materias ganadas (>= 3.0)
+        df['aprobado'] = (df['final_grade'] >= 3.0).astype(int)
+        res = df.groupby('barrio', observed=True)['aprobado'].mean().reset_index(name='value')
+        res['value'] = (res['value'] * 100).round(1)
+    elif metrica == 'riesgo':
+        # Porcentaje de materias perdidas (< 3.0)
+        res = df.groupby('barrio', observed=True)['mortalidad'].mean().reset_index(name='value')
+        res['value'] = (res['value'] * 100).round(1)
+    else:
+        return []
+    
+    # Formato final para ECharts [{"name": "Barrio", "value": X}]
+    res = res.dropna(subset=['value'])
+    # Remover posibles 'Nan' strings si se filtró algo vacío
+    res = res[~res['barrio'].isin(['Nan', 'None', ''])]
+    res = res.rename(columns={'barrio': 'name'})
+    
+    return clean_df_for_json(res[['name', 'value']])
 
 @app.get("/api/materias-list")
 def get_materias_list():
@@ -280,7 +379,7 @@ def read_index():
 
 app.mount("/", StaticFiles(directory="public"), name="public")
 
-# FIX DEL PUERTO PARA RENDER
+# ARRANQUE PARA RENDER
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run("api:app", host="0.0.0.0", port=port)

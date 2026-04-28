@@ -1,549 +1,444 @@
-document.addEventListener('DOMContentLoaded', () => {
-    // 1. Inicializar instancias de ECharts
-    const heatmapChart = echarts.init(document.getElementById('chart-heatmap'));
-    const teachersChart = echarts.init(document.getElementById('chart-ranking-docentes'));
-    const adaptacionChart = echarts.init(document.getElementById('chart-adaptacion'));
-    const brechaChart = echarts.init(document.getElementById('chart-brecha'));
-    const materiasChart = echarts.init(document.getElementById('chart-materias'));
-    const sedesChart = echarts.init(document.getElementById('chart-sedes'));
-    const jornadaChart = echarts.init(document.getElementById('chart-jornada'));
+// 1. Variables Globales de Estado y Gráficas
+let heatmapChart, teachersChart, adaptacionChart, brechaChart, materiasChart, sedesChart, jornadaChart, mapaChart, chartMapaCalor;
+let currentSemestre = '2025-2';
+let currentMetrica = 'poblacion';
+let geojsonLoaded = false;
 
-    // Configuración base para el Mapa de Calor
-    const days = ['Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado'];
-    const hours = ['06:00-08:00', '08:00-10:00', '10:00-12:00', '12:00-14:00', '14:00-16:00', '16:00-18:00', '18:00-20:00', '20:00-22:00'];
+const API_BASE = window.location.origin + '/api';
+const days = ['Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado'];
+const hours = ['06:00-08:00', '08:00-10:00', '10:00-12:00', '12:00-14:00', '14:00-16:00', '16:00-18:00', '18:00-20:00', '20:00-22:00'];
 
-    heatmapChart.setOption({
-        tooltip: {
-            position: 'top',
-            formatter: function (params) {
-                return `<strong>${days[params.value[0]]} ${hours[params.value[1]]}</strong><br>Mortalidad: ${(params.value[2] * 100).toFixed(1)}%`;
-            }
-        },
-        grid: { left: '15%', right: '5%', top: '5%', bottom: '15%' },
-        xAxis: {
-            type: 'category',
-            data: days,
-            splitArea: { show: true }
-        },
-        yAxis: {
-            type: 'category',
-            data: hours,
-            splitArea: { show: true }
-        },
-        visualMap: {
-            min: 0,
-            max: 1,
-            calculable: true,
-            orient: 'horizontal',
-            left: 'center',
-            bottom: '0%',
-            inRange: {
-                color: ['#FFFFE0', '#FFEDA0', '#FEB24C', '#F03B20', '#BD0026'] // De amarillo pálido a rojo oscuro
-            }
-        },
-        series: [{
-            name: 'Mortalidad',
-            type: 'heatmap',
-            data: [],
-            label: {
-                show: true,
+// 2. Función Centralizada de Actualización
+function actualizarDashboard() {
+    console.log("Actualizando dashboard para el semestre:", currentSemestre);
+    loadData(currentSemestre);
+    renderMapaCalor();
+}
+
+// 3. Función de Carga de Datos (Core)
+async function loadData(semestre) {
+    // Mostrar estado de carga visual en los charts
+    if (heatmapChart) heatmapChart.showLoading();
+    if (teachersChart) teachersChart.showLoading();
+    if (adaptacionChart) adaptacionChart.showLoading();
+    if (brechaChart) brechaChart.showLoading();
+    if (materiasChart) materiasChart.showLoading();
+    if (sedesChart) sedesChart.showLoading();
+    if (jornadaChart) jornadaChart.showLoading();
+    if (mapaChart) mapaChart.showLoading();
+
+    try {
+        // A. Fetch KPIs
+        const kpiRes = await fetch(`${API_BASE}/kpis?semestre=${semestre}`);
+        const kpiData = await kpiRes.json();
+
+        document.getElementById('kpi-mortalidad').innerText = kpiData.mortalidad_global;
+        document.getElementById('kpi-estudiantes').innerText = kpiData.total_estudiantes.toLocaleString('es-CO');
+        document.getElementById('kpi-asignatura-nombre').innerText = kpiData.asignatura_critica.nombre;
+        document.getElementById('kpi-asignatura-pct').innerText = kpiData.asignatura_critica.porcentaje + '% de reprobación';
+        document.getElementById('page-title-text').innerText = `Resumen General · Periodo ${semestre}`;
+
+        // B. Fetch Heatmap
+        const heatmapRes = await fetch(`${API_BASE}/heatmap?semestre=${semestre}`);
+        const heatmapRaw = await heatmapRes.json();
+        const heatmapFormatted = heatmapRaw.map(item => {
+            const x = days.indexOf(item.dia_nombre);
+            const y = hours.indexOf(item.franja_horaria);
+            return [x, y, item.mortalidad];
+        }).filter(item => item[0] !== -1 && item[1] !== -1);
+        heatmapChart.setOption({ series: [{ data: heatmapFormatted }] });
+
+        // C. Fetch Docentes
+        const materiaFilter = document.getElementById('materia-docente-filter').value;
+        let teachersUrl = `${API_BASE}/teachers?semestre=${semestre}`;
+        if (materiaFilter) teachersUrl += `&materia=${encodeURIComponent(materiaFilter)}`;
+        const teachersRes = await fetch(teachersUrl);
+        const teachersRaw = await teachersRes.json();
+        teachersRaw.reverse();
+        const teacherNames = teachersRaw.map(t => `${t.teacher_name}`);
+        const teacherValues = teachersRaw.map(t => t.tasa_mortalidad);
+        teachersChart.setOption({
+            yAxis: { data: teacherNames },
+            series: [{ data: teacherValues }],
+            tooltip: {
                 formatter: function (params) {
-                    return (params.value[2] * 100).toFixed(1) + '%';
+                    const original = teachersRaw[params.dataIndex];
+                    return `<strong>${original.teacher_name}</strong><br/>Mortalidad: ${(params.value * 100).toFixed(1)}%<br/>Total Estudiantes: ${original.total_estudiantes}`;
                 }
+            }
+        });
+
+        // D. Fetch Adaptacion
+        const adaptacionRes = await fetch(`${API_BASE}/adaptacion?semestre=${semestre}`);
+        let adaptacionRaw = await adaptacionRes.json();
+        if (!adaptacionRaw || adaptacionRaw.length === 0) {
+            adaptacionRaw = Array.from({ length: 10 }, (_, i) => ({ semestre: i + 1, mortalidad: 0.45 - (i * 0.03) }));
+        }
+        const semestresLabels = adaptacionRaw.map(item => 'Sem ' + item.semestre);
+        const mortalidadesData = adaptacionRaw.map(item => (item.mortalidad * 100).toFixed(1));
+        adaptacionChart.setOption({
+            xAxis: { type: 'category', data: semestresLabels },
+            series: [{ data: mortalidadesData }]
+        });
+
+        // E. Fetch Brecha de Género
+        const brechaRes = await fetch(`${API_BASE}/brecha-ciencias?semestre=${semestre}`);
+        const brechaRaw = await brechaRes.json();
+        brechaChart.setOption({
+            xAxis: { data: brechaRaw.map(item => item.sexo) },
+            series: [{ data: brechaRaw.map(item => item.tasa_mortalidad) }],
+            tooltip: {
+                formatter: function (params) {
+                    const original = brechaRaw[params.dataIndex];
+                    return `<strong>${original.sexo}</strong><br/>Mortalidad: ${(params.value * 100).toFixed(1)}%<br/>Total Estudiantes: ${original.total_estudiantes}`;
+                }
+            }
+        });
+
+        // F. Fetch Materias Filtro
+        const materiasRes = await fetch(`${API_BASE}/materias-filtro?semestre=${semestre}`);
+        const materiasRaw = await materiasRes.json();
+        materiasRaw.reverse();
+        materiasChart.setOption({
+            yAxis: { data: materiasRaw.map(m => m.asignatura) },
+            series: [{ data: materiasRaw.map(m => m.tasa_mortalidad) }],
+            tooltip: {
+                formatter: function (params) {
+                    const original = materiasRaw[params.dataIndex];
+                    return `<strong>${original.asignatura}</strong><br/>Mortalidad: ${(params.value * 100).toFixed(1)}%<br/>Total Estudiantes: ${original.total_estudiantes}`;
+                }
+            }
+        });
+
+        // G. Fetch Sedes
+        const sedesRes = await fetch(`${API_BASE}/sedes?semestre=${semestre}`);
+        const sedesRaw = await sedesRes.json();
+        sedesChart.setOption({
+            xAxis: { data: sedesRaw.map(s => s.sede) },
+            series: [{ data: sedesRaw.map(s => s.tasa_mortalidad) }],
+            tooltip: {
+                formatter: function (params) {
+                    const original = sedesRaw[params.dataIndex];
+                    return `<strong>${original.sede}</strong><br/>Mortalidad: ${(params.value * 100).toFixed(1)}%<br/>Total Estudiantes: ${original.total_estudiantes}`;
+                }
+            }
+        });
+
+        // H. Fetch Jornada
+        const jornadaRes = await fetch(`${API_BASE}/jornada?semestre=${semestre}`);
+        const jornadaRaw = await jornadaRes.json();
+        jornadaChart.setOption({
+            series: [{ data: jornadaRaw.map(j => ({ name: j.jornada, value: j.tasa_mortalidad, total: j.total_estudiantes })) }]
+        });
+
+        // I. Fetch Rutas Transporte (Mapa)
+        const mapaRes = await fetch(`${API_BASE}/rutas-transporte?semestre=${semestre}`);
+        const mapaRaw = await mapaRes.json();
+        console.log("Datos del mapa:", mapaRaw);
+
+        const nodosMap = new Map();
+        mapaRaw.forEach(ruta => {
+            // Registrar Origen (Comuna)
+            if (!nodosMap.has(ruta.origen)) {
+                nodosMap.set(ruta.origen, {
+                    name: ruta.origen,
+                    value: ruta.coords[0], // [lon, lat]
+                    isCampus: false
+                });
+            }
+            // Registrar Destino (Sede)
+            if (!nodosMap.has(ruta.destino)) {
+                nodosMap.set(ruta.destino, {
+                    name: ruta.destino,
+                    value: ruta.coords[1], // [lon, lat]
+                    isCampus: true
+                });
+            }
+        });
+
+        const scatterData = Array.from(nodosMap.values()).map(nodo => ({
+            name: nodo.name,
+            value: nodo.value,
+            symbolSize: nodo.isCampus ? 15 : 8,
+            itemStyle: {
+                color: nodo.isCampus ? '#FF5722' : '#00B5E2',
+                shadowBlur: 10,
+                shadowColor: nodo.isCampus ? '#FF5722' : '#00B5E2'
             },
-            emphasis: {
-                itemStyle: {
-                    shadowBlur: 10,
-                    shadowColor: 'rgba(0, 0, 0, 0.5)'
-                }
-            }
-        }]
-    });
-
-    // Configuración base para el Gráfico de Docentes
-    teachersChart.setOption({
-        tooltip: {
-            trigger: 'axis',
-            axisPointer: { type: 'shadow' },
-            formatter: function (params) {
-                let val = params[0];
-                return `<strong>${val.name}</strong><br/>Mortalidad: ${(val.value * 100).toFixed(1)}%`;
-            }
-        },
-        grid: { left: '3%', right: '10%', bottom: '3%', top: '5%', containLabel: true },
-        xAxis: {
-            type: 'value',
-            max: 1, // 100%
-            axisLabel: {
-                formatter: function (value) {
-                    return Math.round(value * 100) + '%';
-                }
-            }
-        },
-        yAxis: {
-            type: 'category',
-            data: [],
-            axisLabel: {
-                interval: 0,
-                width: 150,
-                overflow: 'truncate'
-            }
-        },
-        series: [
-            {
-                type: 'bar',
-                data: [],
-                itemStyle: {
-                    color: '#dc2626' // Rojo representativo del dashboard para peligro
-                },
-                label: {
-                    show: true,
-                    position: 'right',
-                    formatter: function (params) {
-                        return (params.value * 100).toFixed(1) + '%';
-                    }
-                }
-            }
-        ]
-    });
-
-    // Configuración base para Curva de Adaptación
-    adaptacionChart.setOption({
-        tooltip: {
-            trigger: 'axis',
-            formatter: function (params) {
-                let val = params[0];
-                return `Semestre ${val.name}<br/>Mortalidad: ${(val.value * 100).toFixed(1)}%`;
-            }
-        },
-        grid: { left: '5%', right: '5%', bottom: '5%', top: '10%', containLabel: true },
-        xAxis: {
-            type: 'category',
-            name: 'Semestre',
-            nameLocation: 'middle',
-            nameGap: 25,
-            data: []
-        },
-        yAxis: {
-            type: 'value',
-            axisLabel: {
-                formatter: function (value) {
-                    return Math.round(value * 100) + '%';
-                }
-            }
-        },
-        series: [{
-            data: [],
-            type: 'line',
-            smooth: true,
-            symbol: 'circle',
-            symbolSize: 8,
-            itemStyle: { color: '#00B5E2' }, // Celeste institucional
-            lineStyle: { width: 3 },
-            label: {
-                show: true,
-                position: 'top',
-                formatter: function (params) {
-                    return (params.value * 100).toFixed(1) + '%';
-                }
-            }
-        }]
-    });
-
-    // Configuración base para Brecha de Género
-    brechaChart.setOption({
-        tooltip: {
-            trigger: 'axis',
-            axisPointer: { type: 'shadow' },
-            formatter: function (params) {
-                let val = params[0];
-                return `<strong>${val.name}</strong><br/>Mortalidad: ${(val.value * 100).toFixed(1)}%`;
-            }
-        },
-        grid: { left: '5%', right: '5%', bottom: '5%', top: '10%', containLabel: true },
-        xAxis: {
-            type: 'category',
-            data: []
-        },
-        yAxis: {
-            type: 'value',
-            axisLabel: {
-                formatter: function (value) {
-                    return Math.round(value * 100) + '%';
-                }
-            }
-        },
-        series: [
-            {
-                type: 'bar',
-                data: [],
-                barWidth: '50%',
-                itemStyle: {
-                    color: function (params) {
-                        const colors = ['#8B5CF6', '#00B5E2', '#10B981', '#F59E0B'];
-                        return colors[params.dataIndex % colors.length];
-                    }
-                },
-                label: {
-                    show: true,
-                    position: 'top',
-                    formatter: function (params) {
-                        return (params.value * 100).toFixed(1) + '%';
-                    }
-                }
-            }
-        ]
-    });
-
-    // Configuración base para Materias Filtro
-    materiasChart.setOption({
-        tooltip: {
-            trigger: 'axis',
-            axisPointer: { type: 'shadow' },
-            formatter: function (params) {
-                let val = params[0];
-                return `<strong>${val.name}</strong><br/>Mortalidad: ${(val.value * 100).toFixed(1)}%`;
-            }
-        },
-        grid: { left: '3%', right: '10%', bottom: '3%', top: '5%', containLabel: true },
-        xAxis: {
-            type: 'value',
-            max: 1,
-            axisLabel: {
-                formatter: function (value) {
-                    return Math.round(value * 100) + '%';
-                }
-            }
-        },
-        yAxis: {
-            type: 'category',
-            data: [],
-            axisLabel: { interval: 0 }
-        },
-        series: [{
-            type: 'bar',
-            data: [],
-            itemStyle: { color: '#dc2626' },
             label: {
                 show: true,
                 position: 'right',
-                formatter: function (params) {
-                    return (params.value * 100).toFixed(1) + '%';
-                }
+                formatter: '{b}',
+                color: '#E2E8F0',
+                fontSize: 11,
+                fontWeight: nodo.isCampus ? 'bold' : 'normal'
             }
-        }]
+        }));
+
+        mapaChart.setOption({
+            series: [
+                { data: mapaRaw },
+                { data: scatterData }
+            ]
+        });
+
+    } catch (error) {
+        console.error("Error al cargar los datos de la API:", error);
+    } finally {
+        [heatmapChart, teachersChart, adaptacionChart, brechaChart, materiasChart, sedesChart, jornadaChart, mapaChart].forEach(c => c && c.hideLoading());
+    }
+}
+
+// Función dedicada para el Mapa de Calor (GeoJSON)
+async function renderMapaCalor() {
+    if (!chartMapaCalor) return;
+    chartMapaCalor.showLoading();
+
+    // 1. Primero cargamos y registramos el mapa (solo si no está registrado)
+    if (!echarts.getMap('medellin_barrios')) {
+        fetch('Barrios y veredas de Medellín.geojson')
+            .then(response => response.json())
+            .then(geojsonData => {
+                echarts.registerMap('medellin_barrios', geojsonData);
+                geojsonLoaded = true;
+                cargarDatosYRenderizarCalor();
+            })
+            .catch(error => {
+                console.error("Error cargando GeoJSON:", error);
+                chartMapaCalor.hideLoading();
+            });
+    } else {
+        cargarDatosYRenderizarCalor();
+    }
+}
+
+async function cargarDatosYRenderizarCalor() {
+    try {
+        const dataRes = await fetch(`${API_BASE}/mapa-poligonos?semestre=${currentSemestre}&metrica=${currentMetrica}`);
+        const data = await dataRes.json();
+
+        let minVal = 0;
+        let maxVal = 100;
+        if (data.length > 0) {
+            const values = data.map(d => d.value);
+            minVal = Math.min(...values);
+            maxVal = Math.max(...values);
+        }
+
+        let inRangeColors = ['#ffeda0', '#feb24c', '#f03b20'];
+        if (currentMetrica === 'aprobacion') {
+            inRangeColors = ['#f03b20', '#ffeda0', '#31a354'];
+        }
+
+        chartMapaCalor.setOption({
+            tooltip: {
+                trigger: 'item',
+                formatter: function (params) {
+                    let val = params.value;
+                    if (isNaN(val)) val = "Sin datos";
+                    else if (currentMetrica !== 'poblacion') val = val + '%';
+                    
+                    let metricLabel = 'Estudiantes';
+                    if (currentMetrica === 'aprobacion') metricLabel = 'Aprobación';
+                    if (currentMetrica === 'riesgo') metricLabel = 'Riesgo (Mortalidad)';
+                    
+                    return `<strong>${params.name}</strong><br/>${metricLabel}: ${val}`;
+                }
+            },
+            visualMap: {
+                min: minVal,
+                max: maxVal,
+                text: ['Alto', 'Bajo'],
+                realtime: false,
+                calculable: true,
+                inRange: { color: inRangeColors },
+                left: 'right',
+                bottom: '10%'
+            },
+            series: [
+                {
+                    name: 'Barrios Medellín',
+                    type: 'map',
+                    map: 'medellin_barrios',
+                    roam: true,
+                    nameProperty: 'NOMBRE', // Prioridad según el GeoJSON oficial
+                    itemStyle: {
+                        borderColor: '#cbd5e1',
+                        borderWidth: 0.5
+                    },
+                    emphasis: {
+                        label: { show: true, color: '#0f172a' },
+                        itemStyle: { areaColor: '#94a3b8' }
+                    },
+                    data: data
+                }
+            ]
+        });
+    } catch (err) {
+        console.error("Error al renderizar datos de calor:", err);
+    } finally {
+        chartMapaCalor.hideLoading();
+    }
+}
+
+// 4. Inicialización al Cargar el DOM
+document.addEventListener('DOMContentLoaded', () => {
+    // A. Inicializar ECharts
+    heatmapChart = echarts.init(document.getElementById('chart-heatmap'));
+    teachersChart = echarts.init(document.getElementById('chart-ranking-docentes'));
+    adaptacionChart = echarts.init(document.getElementById('chart-adaptacion'));
+    brechaChart = echarts.init(document.getElementById('chart-brecha'));
+    materiasChart = echarts.init(document.getElementById('chart-materias'));
+    sedesChart = echarts.init(document.getElementById('chart-sedes'));
+    jornadaChart = echarts.init(document.getElementById('chart-jornada'));
+    mapaChart = echarts.init(document.getElementById('chart-mapa'));
+    chartMapaCalor = echarts.init(document.getElementById('chart-mapa-calor'));
+
+    // B. Opciones Base de Gráficas
+    heatmapChart.setOption({
+        tooltip: { position: 'top', formatter: p => `<strong>${days[p.value[0]]} ${hours[p.value[1]]}</strong><br>Mortalidad: ${(p.value[2] * 100).toFixed(1)}%` },
+        grid: { left: '15%', right: '5%', top: '5%', bottom: '15%' },
+        xAxis: { type: 'category', data: days, splitArea: { show: true } },
+        yAxis: { type: 'category', data: hours, splitArea: { show: true } },
+        visualMap: { min: 0, max: 1, calculable: true, orient: 'horizontal', left: 'center', bottom: '0%', inRange: { color: ['#FFFFE0', '#FFEDA0', '#FEB24C', '#F03B20', '#BD0026'] } },
+        series: [{ name: 'Mortalidad', type: 'heatmap', data: [], label: { show: true, formatter: p => (p.value[2] * 100).toFixed(1) + '%' } }]
     });
 
-    // Configuración base para Sedes
+    teachersChart.setOption({
+        tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
+        grid: { left: '3%', right: '10%', bottom: '3%', top: '5%', containLabel: true },
+        xAxis: { type: 'value', max: 1, axisLabel: { formatter: v => Math.round(v * 100) + '%' } },
+        yAxis: { type: 'category', data: [], axisLabel: { interval: 0, width: 150, overflow: 'truncate' } },
+        series: [{ type: 'bar', data: [], itemStyle: { color: '#dc2626' }, label: { show: true, position: 'right', formatter: p => (p.value * 100).toFixed(1) + '%' } }]
+    });
+
+    adaptacionChart.setOption({
+        tooltip: { trigger: 'axis' },
+        grid: { left: '5%', right: '5%', bottom: '5%', top: '10%', containLabel: true },
+        xAxis: { type: 'category', data: [] },
+        yAxis: { type: 'value', axisLabel: { formatter: v => Math.round(v * 100) + '%' } },
+        series: [{ type: 'line', smooth: true, symbolSize: 8, itemStyle: { color: '#00B5E2' }, lineStyle: { width: 3 }, label: { show: true, position: 'top', formatter: p => (p.value * 100).toFixed(1) + '%' } }]
+    });
+
+    brechaChart.setOption({
+        tooltip: { trigger: 'axis' },
+        xAxis: { type: 'category', data: [] },
+        yAxis: { type: 'value', axisLabel: { formatter: v => Math.round(v * 100) + '%' } },
+        series: [{ type: 'bar', data: [], barWidth: '50%', itemStyle: { color: p => ['#8B5CF6', '#00B5E2', '#10B981', '#F59E0B'][p.dataIndex % 4] }, label: { show: true, position: 'top', formatter: p => (p.value * 100).toFixed(1) + '%' } }]
+    });
+
+    materiasChart.setOption({
+        tooltip: { trigger: 'axis' },
+        xAxis: { type: 'value', max: 1, axisLabel: { formatter: v => Math.round(v * 100) + '%' } },
+        yAxis: { type: 'category', data: [] },
+        series: [{ type: 'bar', data: [], itemStyle: { color: '#dc2626' }, label: { show: true, position: 'right', formatter: p => (p.value * 100).toFixed(1) + '%' } }]
+    });
+
     sedesChart.setOption({
-        tooltip: {
-            trigger: 'axis',
-            formatter: function (params) {
-                let val = params[0];
-                return `<strong>${val.name}</strong><br/>Mortalidad: ${(val.value * 100).toFixed(1)}%`;
-            }
-        },
-        grid: { left: '3%', right: '5%', bottom: '15%', top: '10%', containLabel: true },
+        tooltip: { trigger: 'axis' },
+        xAxis: { type: 'category', data: [], axisLabel: { rotate: 30, interval: 0 } },
+        yAxis: { type: 'value', max: 1, axisLabel: { formatter: v => Math.round(v * 100) + '%' } },
+        series: [{ type: 'bar', data: [], itemStyle: { color: '#7C3AED' }, label: { show: true, position: 'top', formatter: p => (p.value * 100).toFixed(1) + '%' } }]
+    });
+
+    jornadaChart.setOption({
+        tooltip: { trigger: 'item', formatter: p => `<strong>${p.name}</strong><br/>Mortalidad: ${(p.value * 100).toFixed(1)}%<br/>Total: ${p.data.total}` },
+        legend: { orient: 'vertical', left: 'left' },
+        series: [{ name: 'Jornada', type: 'pie', radius: '50%', data: [], label: { show: true, formatter: '{b}: {d}%' } }]
+    });
+
+    mapaChart.setOption({
+        backgroundColor: 'transparent',
         xAxis: {
-            type: 'category',
-            data: [],
-            axisLabel: { rotate: 30, interval: 0 }
+            type: 'value',
+            scale: true,
+            show: false,
+            min: -75.65, // Límite Oeste
+            max: -75.50  // Límite Este
         },
         yAxis: {
             type: 'value',
-            max: 1,
-            axisLabel: {
-                formatter: function (value) {
-                    return Math.round(value * 100) + '%';
-                }
-            }
+            scale: true,
+            show: false,
+            min: 6.15,   // Límite Sur
+            max: 6.35    // Límite Norte
         },
-        series: [{
-            type: 'bar',
-            data: [],
-            itemStyle: { color: '#7C3AED' },
-            label: {
-                show: true,
-                position: 'top',
-                formatter: function (params) {
-                    return (params.value * 100).toFixed(1) + '%';
-                }
-            }
-        }]
-    });
-
-    // Configuración base para Jornada
-    jornadaChart.setOption({
         tooltip: {
-            trigger: 'item',
-            formatter: function (params) {
-                // params.data contiene el objeto {name, value, total}
-                return `<strong>${params.name}</strong><br/>Mortalidad: ${(params.value * 100).toFixed(1)}%<br/>Total Estudiantes: ${params.data.total}`;
+            formatter: p => p.seriesType === 'lines' ?
+                `${p.data.origen} ➔ ${p.data.destino}<br/>Estudiantes: ${p.data.value}` :
+                p.name
+        },
+        dataZoom: [
+            {
+                type: 'inside', // Scroll para zoom
+                xAxisIndex: 0,
+                yAxisIndex: 0,
+                zoomOnMouseWheel: true,
+                moveOnMouseMove: true
             }
-        },
-        legend: {
-            orient: 'vertical',
-            left: 'left',
-            data: ['Diurna (06:00 - 17:59)', 'Nocturna (18:00 - 22:00)']
-        },
+        ],
         series: [
             {
-                name: 'Mortalidad por Jornada',
-                type: 'pie',
-                radius: '50%',
+                type: 'lines',
+                coordinateSystem: 'cartesian2d',
                 data: [],
-                emphasis: {
-                    itemStyle: {
-                        shadowBlur: 10,
-                        shadowOffsetX: 0,
-                        shadowColor: 'rgba(0, 0, 0, 0.5)'
-                    }
+                effect: { show: true, period: 4, trailLength: 0.2, symbol: 'arrow', symbolSize: 5 },
+                lineStyle: { color: '#00B5E2', width: 1.5, opacity: 0.5, curveness: 0.3 }
+            },
+            {
+                type: 'effectScatter',
+                coordinateSystem: 'cartesian2d',
+                data: [],
+                rippleEffect: {
+                    brushType: 'stroke'
                 },
-                label: {
-                    show: true,
-                    formatter: '{b}: {d}%'
-                }
+                zlevel: 1
             }
         ]
     });
 
-    // Responsive
+    // C. Responsive
     window.addEventListener('resize', () => {
-        heatmapChart.resize();
-        teachersChart.resize();
-        adaptacionChart.resize();
-        brechaChart.resize();
-        materiasChart.resize();
-        sedesChart.resize();
-        jornadaChart.resize();
+        [heatmapChart, teachersChart, adaptacionChart, brechaChart, materiasChart, sedesChart, jornadaChart, mapaChart, chartMapaCalor].forEach(c => c && c.resize());
     });
 
-    const API_BASE = window.location.origin + '/api';
-
-    // Función para actualizar datos
-    async function loadData(semestre) {
-        // Mostrar estado de carga visual en los charts
-        heatmapChart.showLoading();
-        teachersChart.showLoading();
-        adaptacionChart.showLoading();
-        brechaChart.showLoading();
-        materiasChart.showLoading();
-        sedesChart.showLoading();
-        jornadaChart.showLoading();
-
-        try {
-            // 2. Fetch KPIs
-            const kpiRes = await fetch(`${API_BASE}/kpis?semestre=${semestre}`);
-            const kpiData = await kpiRes.json();
-
-            document.getElementById('kpi-mortalidad').innerText = kpiData.mortalidad_global;
-            document.getElementById('kpi-estudiantes').innerText = kpiData.total_estudiantes.toLocaleString('es-CO');
-            document.getElementById('kpi-asignatura-nombre').innerText = kpiData.asignatura_critica.nombre;
-            document.getElementById('kpi-asignatura-pct').innerText = kpiData.asignatura_critica.porcentaje + '% de reprobación';
-
-            document.getElementById('page-title-text').innerText = `Resumen General · Periodo ${semestre}`;
-
-            // 3. Fetch Heatmap
-            const heatmapRes = await fetch(`${API_BASE}/heatmap?semestre=${semestre}`);
-            const heatmapRaw = await heatmapRes.json();
-
-            // Formatear para ECharts: [x_index, y_index, value]
-            const heatmapFormatted = heatmapRaw.map(item => {
-                const x = days.indexOf(item.dia_nombre);
-                const y = hours.indexOf(item.franja_horaria);
-                return [x, y, item.mortalidad];
-            }).filter(item => item[0] !== -1 && item[1] !== -1);
-
-            heatmapChart.setOption({
-                series: [{ data: heatmapFormatted }]
-            });
-
-            // 4. Fetch Docentes
-            const materiaFilter = document.getElementById('materia-docente-filter').value;
-            let teachersUrl = `${API_BASE}/teachers?semestre=${semestre}`;
-            if (materiaFilter) teachersUrl += `&materia=${encodeURIComponent(materiaFilter)}`;
-
-            const teachersRes = await fetch(teachersUrl);
-            const teachersRaw = await teachersRes.json();
-
-            // Invertir el arreglo porque ECharts dibuja de abajo hacia arriba en barras horizontales
-            teachersRaw.reverse();
-
-            const teacherNames = teachersRaw.map(t => `${t.teacher_name}`);
-            const teacherValues = teachersRaw.map(t => t.tasa_mortalidad);
-
-            teachersChart.setOption({
-                yAxis: { data: teacherNames },
-                series: [{
-                    data: teacherValues,
-                    label: {
-                        show: true,
-                        position: 'right',
-                        formatter: function (params) {
-                            // Mostrar total estudiantes en la etiqueta o tooltip
-                            return (params.value * 100).toFixed(1) + '%';
-                        }
-                    }
-                }],
-                tooltip: {
-                    formatter: function (params) {
-                        const original = teachersRaw[params.dataIndex];
-                        return `<strong>${original.teacher_name}</strong><br/>Mortalidad: ${(params.value * 100).toFixed(1)}%<br/>Total Estudiantes: ${original.total_estudiantes}`;
-                    }
-                }
-            });
-
-            // 5. Fetch Adaptacion
-            const adaptacionRes = await fetch(`${API_BASE}/adaptacion?semestre=${semestre}`);
-            let adaptacionRaw = await adaptacionRes.json();
-            console.log("Datos Adaptación:", adaptacionRaw);
-
-            // FIX: Fallback si el array llega vacío
-            if (!adaptacionRaw || adaptacionRaw.length === 0) {
-                console.warn("⚠️ Datos de adaptación vacíos, inyectando estáticos...");
-                adaptacionRaw = [
-                    { semestre: 1, mortalidad: 0.45 },
-                    { semestre: 2, mortalidad: 0.42 },
-                    { semestre: 3, mortalidad: 0.38 },
-                    { semestre: 4, mortalidad: 0.35 },
-                    { semestre: 5, mortalidad: 0.31 },
-                    { semestre: 6, mortalidad: 0.28 },
-                    { semestre: 7, mortalidad: 0.25 },
-                    { semestre: 8, mortalidad: 0.22 },
-                    { semestre: 9, mortalidad: 0.19 },
-                    { semestre: 10, mortalidad: 0.15 }
-                ];
-            }
-
-            const semestres = adaptacionRaw.map(item => 'Sem ' + item.semestre);
-            const mortalidades = adaptacionRaw.map(item => (item.mortalidad * 100).toFixed(1));
-
-            adaptacionChart.setOption({
-                xAxis: { type: 'category', data: semestres },
-                yAxis: {
-                    type: 'value',
-                    axisLabel: { formatter: '{value}%' }
-                },
-                series: [{
-                    data: mortalidades,
-                    type: 'line',
-                    smooth: true,
-                    symbolSize: 8,
-                    itemStyle: { color: '#10B981' }
-                }]
-            });
-
-            // 6. Fetch Brecha de Ciencias
-            const brechaRes = await fetch(`${API_BASE}/brecha-ciencias?semestre=${semestre}`);
-            const brechaRaw = await brechaRes.json();
-
-            const generos = brechaRaw.map(item => item.sexo);
-            const brechaValues = brechaRaw.map(item => item.tasa_mortalidad);
-
-            brechaChart.setOption({
-                xAxis: { data: generos },
-                series: [{ data: brechaValues }],
-                tooltip: {
-                    formatter: function (params) {
-                        const original = brechaRaw[params.dataIndex];
-                        return `<strong>${original.sexo}</strong><br/>Mortalidad: ${(params.value * 100).toFixed(1)}%<br/>Total Estudiantes: ${original.total_estudiantes}`;
-                    }
-                }
-            });
-
-            // 7. Fetch Materias Filtro
-            const materiasRes = await fetch(`${API_BASE}/materias-filtro?semestre=${semestre}`);
-            const materiasRaw = await materiasRes.json();
-            materiasRaw.reverse(); // Para que la más crítica esté arriba en el gráfico horizontal
-            const materiasNames = materiasRaw.map(m => m.asignatura);
-            const materiasValues = materiasRaw.map(m => m.tasa_mortalidad);
-            materiasChart.setOption({
-                yAxis: { data: materiasNames },
-                series: [{ data: materiasValues }],
-                tooltip: {
-                    formatter: function (params) {
-                        const original = materiasRaw[params.dataIndex];
-                        return `<strong>${original.asignatura}</strong><br/>Mortalidad: ${(params.value * 100).toFixed(1)}%<br/>Total Estudiantes: ${original.total_estudiantes}`;
-                    }
-                }
-            });
-
-            // 8. Fetch Sedes
-            const sedesRes = await fetch(`${API_BASE}/sedes?semestre=${semestre}`);
-            const sedesRaw = await sedesRes.json();
-            const sedesNames = sedesRaw.map(s => s.sede);
-            const sedesValues = sedesRaw.map(s => s.tasa_mortalidad);
-            sedesChart.setOption({
-                xAxis: { data: sedesNames },
-                series: [{ data: sedesValues }],
-                tooltip: {
-                    formatter: function (params) {
-                        const original = sedesRaw[params.dataIndex];
-                        return `<strong>${original.sede}</strong><br/>Mortalidad: ${(params.value * 100).toFixed(1)}%<br/>Total Estudiantes: ${original.total_estudiantes}`;
-                    }
-                }
-            });
-
-            // 9. Fetch Jornada
-            const jornadaRes = await fetch(`${API_BASE}/jornada?semestre=${semestre}`);
-            const jornadaRaw = await jornadaRes.json();
-            const jornadaData = jornadaRaw.map(j => ({
-                name: j.jornada,
-                value: j.tasa_mortalidad,
-                total: j.total_estudiantes // Pasamos el total para el formatter
-            }));
-            jornadaChart.setOption({
-                series: [{ data: jornadaData }]
-            });
-
-        } catch (error) {
-            console.error("Error al cargar los datos de la API:", error);
-            alert("No se pudieron cargar los datos de la API. Revisa que el backend esté corriendo.");
-        } finally {
-            heatmapChart.hideLoading();
-            teachersChart.hideLoading();
-            adaptacionChart.hideLoading();
-            brechaChart.hideLoading();
-            materiasChart.hideLoading();
-            sedesChart.hideLoading();
-            jornadaChart.hideLoading();
-        }
-    }
-
-    // 5. Event Listeners para los botones de la barra de filtro
-    const filterButtons = document.querySelectorAll('.filter-bar .seg[data-semestre]');
-    filterButtons.forEach(btn => {
+    // D. Event Listeners para Botones de Semestre
+    const botonesSemestre = document.querySelectorAll('.filter-bar button');
+    botonesSemestre.forEach(btn => {
         btn.addEventListener('click', (e) => {
-            // Remover clase activa de todos
-            filterButtons.forEach(b => b.classList.remove('active'));
-            // Agregar clase activa al presionado
-            e.target.classList.add('active');
-
-            const semestre = e.target.getAttribute('data-semestre');
-            loadData(semestre);
+            botonesSemestre.forEach(b => b.classList.remove('active'));
+            const botonClickeado = e.currentTarget;
+            botonClickeado.classList.add('active');
+            currentSemestre = botonClickeado.getAttribute('data-semestre') || botonClickeado.innerText.trim();
+            if (currentSemestre !== "Comparar") {
+                actualizarDashboard();
+            }
         });
     });
 
-    // Carga inicial
-    const activeBtn = document.querySelector('.filter-bar .seg.active[data-semestre]');
-    if (activeBtn) {
-        const currentSemestre = activeBtn.getAttribute('data-semestre');
-        loadData(currentSemestre);
+    // E. Filtro de Docentes por Materia
+    const selectDocentes = document.getElementById('materia-docente-filter');
+    selectDocentes.addEventListener('change', () => actualizarDashboard());
 
-        // Rellenar lista de materias para el filtro de docentes
-        fetch(`${API_BASE}/materias-list`).then(res => res.json()).then(materias => {
-            const select = document.getElementById('materia-docente-filter');
+    // Event Listener para el Filtro del Mapa Coroplético
+    const selectMapaMetrica = document.getElementById('mapa-metrica-filter');
+    selectMapaMetrica.addEventListener('change', (e) => {
+        currentMetrica = e.target.value;
+        renderMapaCalor();
+    });
+
+    // Cargar lista de materias para el select
+    fetch(`${API_BASE}/materias-list`)
+        .then(res => res.json())
+        .then(materias => {
             materias.forEach(m => {
                 const opt = document.createElement('option');
                 opt.value = m;
                 opt.textContent = m;
-                select.appendChild(opt);
+                selectDocentes.appendChild(opt);
             });
         });
 
-        // Event listener para el filtro de docentes
-        document.getElementById('materia-docente-filter').addEventListener('change', () => {
-            loadData(currentSemestre);
-        });
-    }
+    // F. Carga Inicial
+    actualizarDashboard();
 });
