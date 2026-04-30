@@ -1,7 +1,8 @@
 // 1. Variables Globales de Estado y Gráficas
-let heatmapChart, teachersChart, adaptacionChart, brechaChart, materiasChart, sedesChart, jornadaChart, mapaChart, chartMapaCalor;
+let heatmapChart, teachersChart, adaptacionChart, brechaChart, materiasChart, sedesChart, jornadaChart, mapaChart, chartMapaCalor, municipiosChart;
 let currentSemestre = '2025-2';
 let currentMetrica = 'poblacion';
+let currentNivelGeo = 'barrio'; // Nivel inicial: Barrios
 let geojsonLoaded = false;
 
 const API_BASE = window.location.origin + '/api';
@@ -34,6 +35,13 @@ async function loadData(semestre) {
 
         document.getElementById('kpi-mortalidad').innerText = kpiData.mortalidad_global;
         document.getElementById('kpi-estudiantes').innerText = kpiData.total_estudiantes.toLocaleString('es-CO');
+
+        // Actualizar el pie de la tarjeta de estudiantes con el contexto de "Fuera de Medellín"
+        const kpiEstFooter = document.querySelector('#kpi-estudiantes').closest('.card').querySelector('.foot');
+        if (kpiEstFooter) {
+            kpiEstFooter.innerHTML = `<strong>${kpiData.total_estudiantes.toLocaleString('es-CO')}</strong> Estudiantes Totales (${kpiData.fuera_de_medellin_o_sin_datos.toLocaleString('es-CO')} fuera de Medellín o sin barrio)`;
+        }
+
         document.getElementById('kpi-asignatura-nombre').innerText = kpiData.asignatura_critica.nombre;
         document.getElementById('kpi-asignatura-pct').innerText = kpiData.asignatura_critica.porcentaje + '% de reprobación';
         document.getElementById('page-title-text').innerText = `Resumen General · Periodo ${semestre}`;
@@ -64,11 +72,11 @@ async function loadData(semestre) {
                 formatter: function (params) {
                     const p = Array.isArray(params) ? params[0] : params;
                     const original = teachersRaw[p.dataIndex];
-                    const tasa = p.value;
-                    const total = original.total_estudiantes;
-                    const afectados = Math.round(tasa * total);
-                    return `<strong>${original.teacher_name}</strong><br/>
-                            Mortalidad: ${(tasa * 100).toFixed(1)}%<br/>
+                    const total = original.total_estudiantes || 0;
+                    const porcentaje = p.value;
+                    const afectados = Math.round(porcentaje * total);
+                    return `<strong>${p.name}</strong><br/>
+                            Mortalidad: ${(porcentaje * 100).toFixed(1)}%<br/>
                             ⚠️ <b>${afectados}</b> reprobados de <b>${total}</b> evaluados`;
                 }
             }
@@ -97,11 +105,11 @@ async function loadData(semestre) {
                 formatter: function (params) {
                     const p = Array.isArray(params) ? params[0] : params;
                     const original = brechaRaw[p.dataIndex];
-                    const tasa = p.value;
-                    const total = original.total_estudiantes;
-                    const afectados = Math.round(tasa * total);
-                    return `<strong>Género: ${original.sexo}</strong><br/>
-                            Mortalidad: ${(tasa * 100).toFixed(1)}%<br/>
+                    const total = original.total_estudiantes || 0;
+                    const porcentaje = p.value;
+                    const afectados = Math.round(porcentaje * total);
+                    return `<strong>${p.name}</strong><br/>
+                            Mortalidad: ${(porcentaje * 100).toFixed(1)}%<br/>
                             ⚠️ <b>${afectados}</b> reprobados de <b>${total}</b> evaluados`;
                 }
             }
@@ -118,11 +126,11 @@ async function loadData(semestre) {
                 formatter: function (params) {
                     const p = Array.isArray(params) ? params[0] : params;
                     const original = materiasRaw[p.dataIndex];
-                    const tasa = p.value;
-                    const total = original.total_estudiantes;
-                    const afectados = Math.round(tasa * total);
-                    return `<strong>${original.asignatura}</strong><br/>
-                            Mortalidad: ${(tasa * 100).toFixed(1)}%<br/>
+                    const total = original.total_estudiantes || 0;
+                    const porcentaje = p.value;
+                    const afectados = Math.round(porcentaje * total);
+                    return `<strong>${p.name}</strong><br/>
+                            Mortalidad: ${(porcentaje * 100).toFixed(1)}%<br/>
                             ⚠️ <b>${afectados}</b> reprobados de <b>${total}</b> evaluados`;
                 }
             }
@@ -138,11 +146,11 @@ async function loadData(semestre) {
                 formatter: function (params) {
                     const p = Array.isArray(params) ? params[0] : params;
                     const original = sedesRaw[p.dataIndex];
-                    const tasa = p.value;
-                    const total = original.total_estudiantes;
-                    const afectados = Math.round(tasa * total);
-                    return `<strong>Sede: ${original.sede}</strong><br/>
-                            Mortalidad: ${(tasa * 100).toFixed(1)}%<br/>
+                    const total = original.total_estudiantes || 0;
+                    const porcentaje = p.value;
+                    const afectados = Math.round(porcentaje * total);
+                    return `<strong>${p.name}</strong><br/>
+                            Mortalidad: ${(porcentaje * 100).toFixed(1)}%<br/>
                             ⚠️ <b>${afectados}</b> reprobados de <b>${total}</b> evaluados`;
                 }
             }
@@ -206,6 +214,9 @@ async function loadData(semestre) {
             ]
         });
 
+        // J. Fetch KPI Fantasmas
+        cargarKPIFantasmas(semestre);
+
     } catch (error) {
         console.error("Error al cargar los datos de la API:", error);
     } finally {
@@ -221,14 +232,26 @@ function renderMapaCalor() {
 
     // 1. Verificar si el mapa ya está registrado
     if (!echarts.getMap('medellin')) {
-        fetch('./medellin.geojson')
+        fetch('medellin.geojson')
             .then(response => {
                 if (!response.ok) throw new Error("No se encontró medellin.geojson (Error 404)");
                 return response.json();
             })
             .then(geojsonData => {
-                // Imprimir en consola para descubrir la propiedad del nombre
-                console.log("Propiedades del primer barrio:", geojsonData.features[0].properties);
+                // Normalizar nombres a mayúsculas para asegurar el cruce
+                geojsonData.features.forEach(feature => {
+                    if (feature.properties) {
+                        // Normalizar barrio
+                        if (feature.properties.nombre_barrio) {
+                            feature.properties.nombre_barrio = String(feature.properties.nombre_barrio).toUpperCase().trim();
+                        }
+                        // Normalizar comuna (intentando varios nombres comunes)
+                        const keyComuna = ['nombre_comuna', 'NOMBRE', 'Name', 'comuna'].find(k => feature.properties[k]);
+                        if (keyComuna) {
+                            feature.properties.nombre_comuna = String(feature.properties[keyComuna]).toUpperCase().trim();
+                        }
+                    }
+                });
 
                 echarts.registerMap('medellin', geojsonData);
                 cargarDatosGeoJSON(chartMapaCalor);
@@ -243,20 +266,56 @@ function renderMapaCalor() {
 }
 
 function cargarDatosGeoJSON(chartInstance) {
-    fetch(`/api/mapa-poligonos?semestre=${currentSemestre}&metrica=${currentMetrica}`)
+    fetch(`/api/mapa-poligonos?semestre=${currentSemestre}&metrica=${currentMetrica}&nivel_geo=${currentNivelGeo}`)
         .then(res => res.json())
         .then(datosDelBackend => {
+            // 1. Forzar el cruce perfecto de nombres y valores (conservando ...d)
+            const datosLimpios = datosDelBackend.map(d => ({
+                ...d,
+                name: String(d.name || d.barrio || '').toUpperCase().trim(),
+                value: d.value != null ? d.value : (d.count || 0)
+            }));
+
+            // 2. Filtrar datos para el gráfico de otros municipios / desconocidos
+            const otrosMunicipios = ['BELLO', 'ITAGUI', 'ENVIGADO', 'SABANETA', 'LA ESTRELLA', 'COPACABANA', 'GIRARDOTA', 'BARBOSA', 'CALDAS', 'DESCONOCIDA', 'UNKNOWN', '** DESCONOCIDA **'];
+            const datosParaGrafico = datosLimpios.filter(d => 
+                otrosMunicipios.some(m => d.name.includes(m)) || d.name === '' || d.name === 'NAN'
+            ).sort((a, b) => b.value - a.value).slice(0, 10); // Top 10 otros
+
+            renderGraficoMunicipios(datosParaGrafico);
+
+            // 3. Calcular máximo seguro (excluyendo NaN)
+            const valoresValidos = datosLimpios.map(d => d.value).filter(v => !isNaN(v));
+            let maxVal = valoresValidos.length > 0 ? Math.max(...valoresValidos) : 100;
+            if (maxVal <= 0) maxVal = 100;
+
             chartInstance.hideLoading();
             chartInstance.setOption({
                 tooltip: {
                     trigger: 'item',
-                    formatter: '{b}<br/>Valor: {c}'
+                    backgroundColor: 'rgba(15, 23, 42, 0.9)',
+                    textStyle: { color: '#fff' },
+                    formatter: function (params) {
+                        // Si pasas el mouse por un barrio sin datos en la BD
+                        if (!params.data) return `<b>${params.name}</b><br/>Sin estudiantes registrados`;
+
+                        const valor = isNaN(params.value) ? 0 : params.value;
+                        const label = currentMetrica === 'poblacion' ? 'Estudiantes' : (currentMetrica === 'aprobacion' ? 'Aprobación' : 'Mortalidad');
+                        const sufijo = currentMetrica === 'poblacion' ? '' : '%';
+
+                        // Intentamos leer el total desde el backend
+                        const total = params.data.total_estudiantes || params.data.total || 'N/A';
+
+                        return `<strong>Barrio: ${params.name}</strong><br/>
+                                ${label}: <b>${valor}${sufijo}</b><br/>
+                                <span style="color: #cbd5e1; font-size: 12px;">Total estudiantes del barrio: ${total}</span>`;
+                    }
                 },
                 visualMap: {
                     left: 'right',
                     min: 0,
-                    max: Math.max(...datosDelBackend.map(d => d.value)) || 100,
-                    inRange: { color: ['#fee0d2', '#de2d26'] }, // Colores de calor
+                    max: maxVal,
+                    inRange: { color: ['#fee0d2', '#de2d26'] },
                     text: ['Alto', 'Bajo'],
                     calculable: true
                 },
@@ -264,8 +323,9 @@ function cargarDatosGeoJSON(chartInstance) {
                     type: 'map',
                     map: 'medellin',
                     roam: true,
-                    nameProperty: 'NOMBRE', // Cambiar a 'Name' o 'Barrio' si la consola lo indica
-                    data: datosDelBackend
+                    scaleLimit: { min: 1, max: 15 }, // Bloquea el zoom out excesivo
+                    nameProperty: currentNivelGeo === 'barrio' ? 'nombre_barrio' : 'nombre_comuna',
+                    data: datosLimpios
                 }]
             });
         })
@@ -273,6 +333,29 @@ function cargarDatosGeoJSON(chartInstance) {
             console.error("Error cargando datos del backend para el mapa:", err);
             chartInstance.hideLoading();
         });
+}
+
+function renderGraficoMunicipios(datos) {
+    if (!municipiosChart) {
+        municipiosChart = echarts.init(document.getElementById('grafico-municipios'));
+    }
+
+    const label = currentMetrica === 'poblacion' ? 'Estudiantes' : (currentMetrica === 'aprobacion' ? 'Aprobación' : 'Mortalidad');
+    const sufijo = currentMetrica === 'poblacion' ? '' : '%';
+
+    municipiosChart.setOption({
+        tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' }, backgroundColor: 'rgba(15, 23, 42, 0.9)', textStyle: { color: '#fff' } },
+        grid: { left: '3%', right: '15%', bottom: '3%', top: '5%', containLabel: true },
+        xAxis: { type: 'value', axisLabel: { formatter: `{value}${sufijo}` } },
+        yAxis: { type: 'category', data: datos.map(d => d.name), axisLabel: { fontSize: 10 } },
+        series: [{
+            name: label,
+            type: 'bar',
+            data: datos.map(d => d.value),
+            itemStyle: { color: '#64748b' },
+            label: { show: true, position: 'right', formatter: `{c}${sufijo}` }
+        }]
+    });
 }
 
 // 4. Inicialización al Cargar el DOM
@@ -365,12 +448,10 @@ document.addEventListener('DOMContentLoaded', () => {
         },
         dataZoom: [
             {
-                type: 'inside', // Scroll para zoom
-                xAxisIndex: 0,
-                yAxisIndex: 0,
+                type: 'inside',
                 zoomOnMouseWheel: true,
                 moveOnMouseMove: true,
-                moveOnMouseWheel: false
+                preventDefaultMouseMove: false
             }
         ],
         series: [
@@ -395,7 +476,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // C. Responsive
     window.addEventListener('resize', () => {
-        [heatmapChart, teachersChart, adaptacionChart, brechaChart, materiasChart, sedesChart, jornadaChart, mapaChart, chartMapaCalor].forEach(c => c && c.resize());
+        [heatmapChart, teachersChart, adaptacionChart, brechaChart, materiasChart, sedesChart, jornadaChart, mapaChart, chartMapaCalor, municipiosChart].forEach(c => c && c.resize());
     });
 
     // D. Event Listeners para Botones de Semestre
@@ -416,12 +497,21 @@ document.addEventListener('DOMContentLoaded', () => {
     const selectDocentes = document.getElementById('materia-docente-filter');
     selectDocentes.addEventListener('change', () => actualizarDashboard());
 
-    // Event Listener para el Filtro del Mapa Coroplético
+    // Event Listener para el Filtro del Mapa Coroplético (Métrica)
     const selectMapaMetrica = document.getElementById('mapa-metrica-filter');
     selectMapaMetrica.addEventListener('change', (e) => {
         currentMetrica = e.target.value;
         renderMapaCalor();
     });
+
+    // Event Listener para el Filtro del Mapa Coroplético (Nivel: Barrio/Comuna)
+    const selectMapaNivel = document.getElementById('mapa-nivel-filter');
+    if (selectMapaNivel) {
+        selectMapaNivel.addEventListener('change', (e) => {
+            currentNivelGeo = e.target.value;
+            renderMapaCalor();
+        });
+    }
 
     // Cargar lista de materias para el select
     fetch(`${API_BASE}/materias-list`)
@@ -438,3 +528,36 @@ document.addEventListener('DOMContentLoaded', () => {
     // F. Carga Inicial
     actualizarDashboard();
 });
+function cargarKPIFantasmas(semestre) {
+    const url = semestre ? `${API_BASE}/kpi-fantasmas?semestre=${semestre}` : `${API_BASE}/kpi-fantasmas`;
+    
+    fetch(url)
+        .then(response => response.json())
+        .then(data => {
+            if(data.error) {
+                console.error("Error desde el backend:", data.error);
+                document.getElementById('kpi-fantasmas-valor').innerText = 'Err';
+                return;
+            }
+            
+            // Si es evolución histórica (lista), tomamos el primero
+            const res = Array.isArray(data) ? data[0] : data;
+            
+            const fantasmas = res.estudiantes_fantasma || 0;
+            const total = res.total_estudiantes || 0;
+            const porcentaje = res.porcentaje || 0;
+            
+            // Actualizar el valor principal
+            document.getElementById('kpi-fantasmas-valor').innerText = fantasmas.toLocaleString('es-CO');
+            
+            // Actualizar el subtexto informativo
+            const subtextoEl = document.getElementById('kpi-fantasmas-subtexto');
+            if (subtextoEl) {
+                subtextoEl.innerHTML = `<b>${porcentaje}%</b> de ${total.toLocaleString('es-CO')} evaluados`;
+            }
+        })
+        .catch(error => {
+            console.error('Error de red cargando KPI Fantasmas:', error);
+            document.getElementById('kpi-fantasmas-valor').innerText = '---';
+        });
+}

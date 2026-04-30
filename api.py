@@ -1,3 +1,4 @@
+print("--- INICIANDO API.PY ---")
 import os
 import pandas as pd
 import numpy as np
@@ -6,12 +7,14 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from dotenv import load_dotenv
 from supabase import create_client, Client
 
 # Cargar variables de entorno
+print("Cargando .env...")
 load_dotenv()
+print(".env cargado.")
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
 
@@ -23,6 +26,7 @@ try:
 except Exception as e:
     print(f"Error cargando CSV de coordenadas: {e}")
     COORDS_CSV = {}
+print("Coordenadas base cargadas.")
 
 # Inyección de Sedes ITM y alias comunes
 COORDS_SEDES = {
@@ -110,6 +114,9 @@ def load_data_from_supabase():
     df = df.merge(df_programs, on='program_id', how='left')
     df = df.merge(df_campuses[['campus_id', 'sede_name']], on='campus_id', how='left')
 
+    # Capturar el total absoluto ANTES de borrar el DataFrame de memoria
+    total_db = int(df_students['student_id'].nunique())
+
     # Renombramos temporalmente sede_name a campus_name para no quebrar otras gráficas que usen campus_name
     df['campus_name'] = df['sede_name']
 
@@ -140,11 +147,12 @@ def load_data_from_supabase():
     dias_semana = {1: 'Lunes', 2: 'Martes', 3: 'Miércoles', 4: 'Jueves', 5: 'Viernes', 6: 'Sábado'}
     df_h['dia_nombre'] = df_h['day_of_week'].map(dias_semana).astype('category')
 
-    print("[RAM] Datos cargados exitosamente desde Supabase.")
-    return df, df_h
+    print(f"[RAM] Datos cargados: {len(df)} registros de rendimiento, {df['student_id'].nunique()} estudiantes activos.")
+    
+    return df, df_h, total_db
 
 # Carga global al inicio
-GLOBAL_DF_MASTER, GLOBAL_DF_HEATMAP = load_data_from_supabase()
+GLOBAL_DF_MASTER, GLOBAL_DF_HEATMAP, TOTAL_ESTUDIANTES_INSTITUCION = load_data_from_supabase()
 
 # --- OPTIMIZACIÓN DE KPIs ---
 print("[KPI] Pre-calculando KPIs estaticos por semestre...")
@@ -154,7 +162,15 @@ all_semesters = GLOBAL_DF_MASTER['semester'].unique()
 for sem in all_semesters:
     df_s = GLOBAL_DF_MASTER[GLOBAL_DF_MASTER['semester'] == sem]
     m_global = round(float(df_s['mortalidad'].mean() * 100), 1) if not df_s.empty else 0.0
-    t_est = int(len(df_s))
+    
+    # KPI TOTAL: Ahora muestra el 100% de la población institucional (ej. 28,076)
+    t_est = TOTAL_ESTUDIANTES_INSTITUCION
+    
+    # Calcular cuántos están fuera de Medellín o sin datos
+    invalid_neighborhoods = ['DESCONOCIDA', 'NAN', 'NONE', '', 'UNKNOWN', '** DESCONOCIDA **']
+    df_s_mapped = df_s[~df_s['barrio'].astype(str).str.upper().str.strip().isin(invalid_neighborhoods)]
+    est_con_mapa = int(df_s_mapped['student_id'].nunique())
+    fuera_medellin = t_est - est_con_mapa
     
     df_mat = df_s[~df_s['subject_name'].str.contains('NIVELATORIO|GRADO|PRACTICA', case=False, na=False)]
     m_stats = df_mat.groupby('subject_name', observed=True).agg(
@@ -172,8 +188,12 @@ for sem in all_semesters:
     STATIC_KPI_CACHE[sem] = {
         "mortalidad_global": m_global,
         "total_estudiantes": t_est,
+        "fuera_de_medellin_o_sin_datos": fuera_medellin,
         "asignatura_critica": a_critica
     }
+    print(f"  - Semestre {sem} listo. (Total: {t_est})")
+
+print("[KPI] Cache completado.")
 
 def clean_df_for_json(df):
     return df.replace({np.nan: None}).to_dict(orient='records')
@@ -182,9 +202,85 @@ def clean_df_for_json(df):
 
 @app.get("/api/kpis")
 def get_kpis(semestre: str = "2025-2"):
-    if semestre in STATIC_KPI_CACHE:
-        return STATIC_KPI_CACHE[semestre]
-    return {"mortalidad_global": 0.0, "total_estudiantes": 0, "asignatura_critica": {"nombre": "N/A", "porcentaje": 0.0}}
+    # 1. Obtener el total absoluto de estudiantes usando el cliente Supabase
+    supabase = get_supabase_client()
+    response_total = supabase.table('students').select('*', count='exact').limit(1).execute()
+    total_estudiantes = response_total.count if response_total.count else 0
+    
+    # 2. Recuperar el resto de métricas desde el cache
+    kpis = STATIC_KPI_CACHE.get(semestre, {
+        "mortalidad_global": 0.0, 
+        "fuera_de_medellin_o_sin_datos": 0,
+        "asignatura_critica": {"nombre": "N/A", "porcentaje": 0.0}
+    })
+    
+    return {
+        "total_estudiantes": total_estudiantes,
+        "mortalidad_global": kpis["mortalidad_global"],
+        "fuera_de_medellin_o_sin_datos": kpis["fuera_de_medellin_o_sin_datos"],
+        "asignatura_critica": kpis["asignatura_critica"]
+    }
+
+@app.get("/api/kpi-fantasmas")
+def get_kpi_fantasmas(semestre: str = None):
+    try:
+        # 1. Consulta con JOIN (Inner Join) para acceder al semestre en class_groups
+        supabase = get_supabase_client()
+        # class_groups!inner asegura que solo traiga registros con un grupo válido y permite filtrar por sus columnas
+        query = supabase.table('academic_performance').select('student_id, final_grade, class_groups!inner(semester)')
+        
+        if semestre:
+            query = query.eq('class_groups.semester', semestre)
+        
+        response = query.limit(100000).execute()
+        data = response.data
+        
+        if not data:
+            return {"estudiantes_fantasma": 0, "total_estudiantes": 0, "porcentaje": 0.0, "semestre": semestre} if semestre else []
+            
+        df = pd.DataFrame(data)
+        
+        # Aplanar la estructura del JOIN: class_groups es un dict con {'semester': '...'}
+        df['semester'] = df['class_groups'].apply(lambda x: x['semester'] if isinstance(x, dict) else None)
+        # Limpieza de notas a numérico
+        df['final_grade'] = pd.to_numeric(df['final_grade'], errors='coerce').fillna(0)
+        
+        if semestre:
+            # Caso: Un solo semestre solicitado
+            total_estudiantes = df['student_id'].nunique()
+            max_grades = df.groupby('student_id')['final_grade'].max()
+            fantasmas = int((max_grades == 0).sum())
+            porcentaje = round((fantasmas / total_estudiantes) * 100, 1) if total_estudiantes > 0 else 0.0
+            
+            return {
+                "estudiantes_fantasma": fantasmas,
+                "total_estudiantes": int(total_estudiantes),
+                "porcentaje": porcentaje,
+                "semestre": semestre
+            }
+        else:
+            # Caso: Evolución histórica (todos los semestres disponibles)
+            evolucion = []
+            for sem_val, group in df.groupby('semester'):
+                total_sem = group['student_id'].nunique()
+                max_sem = group.groupby('student_id')['final_grade'].max()
+                fantasmas_sem = int((max_sem == 0).sum())
+                porcentaje_sem = round((fantasmas_sem / total_sem) * 100, 1) if total_sem > 0 else 0.0
+                
+                evolucion.append({
+                    "semestre": str(sem_val),
+                    "estudiantes_fantasma": fantasmas_sem,
+                    "total_estudiantes": int(total_sem),
+                    "porcentaje": porcentaje_sem
+                })
+            return sorted(evolucion, key=lambda x: x['semestre'], reverse=True)
+
+    except Exception as e:
+        print(f"Error en KPI Fantasmas: {e}")
+        return JSONResponse(
+            status_code=400, 
+            content={"error": str(e), "estudiantes_fantasma": 0, "total_estudiantes": 0, "porcentaje": 0}
+        )
 
 @app.get("/api/heatmap")
 def get_heatmap(semestre: str = "2025-2"):
@@ -338,36 +434,41 @@ def get_rutas_transporte(semestre: str = "2025-2"):
     return result
 
 @app.get("/api/mapa-poligonos")
-def get_mapa_poligonos(semestre: str = "2025-2", metrica: str = 'poblacion'):
+def get_mapa_poligonos(semestre: str = "2025-2", metrica: str = 'poblacion', nivel_geo: str = 'barrio'):
     df = GLOBAL_DF_MASTER
     df = df[df['semester'] == semestre].copy()
     
-    # Limpiar columna barrio (UPPER CASE para cruzar con GeoJSON oficial)
-    df['barrio'] = df['barrio'].astype(str).str.upper().str.strip()
+    # Columna objetivo según el nivel (barrio o comuna)
+    col_geo = 'barrio' if nivel_geo == 'barrio' else 'comuna'
     
+    # Limpiar columna (UPPER CASE para cruzar con GeoJSON oficial)
+    df[col_geo] = df[col_geo].astype(str).str.upper().str.strip()
+    
+    # Cálculo de totales por la unidad geográfica elegida (estudiantes únicos)
+    totales = df.groupby(col_geo, observed=True)['student_id'].nunique().reset_index(name='total_estudiantes')
+
     # Lógica de cálculo según la métrica
     if metrica == 'poblacion':
-        # Conteo de estudiantes únicos
-        res = df.groupby('barrio', observed=True)['student_id'].nunique().reset_index(name='value')
+        res = totales.rename(columns={'total_estudiantes': 'value'})
     elif metrica == 'aprobacion':
-        # Porcentaje de materias ganadas (>= 3.0)
         df['aprobado'] = (df['final_grade'] >= 3.0).astype(int)
-        res = df.groupby('barrio', observed=True)['aprobado'].mean().reset_index(name='value')
+        res = df.groupby(col_geo, observed=True)['aprobado'].mean().reset_index(name='value')
         res['value'] = (res['value'] * 100).round(1)
     elif metrica == 'riesgo':
-        # Porcentaje de materias perdidas (< 3.0)
-        res = df.groupby('barrio', observed=True)['mortalidad'].mean().reset_index(name='value')
+        res = df.groupby(col_geo, observed=True)['mortalidad'].mean().reset_index(name='value')
         res['value'] = (res['value'] * 100).round(1)
     else:
         return []
     
-    # Formato final para ECharts [{"name": "Barrio", "value": X}]
-    res = res.dropna(subset=['value'])
-    # Remover posibles 'Nan' strings si se filtró algo vacío
-    res = res[~res['barrio'].isin(['Nan', 'None', ''])]
-    res = res.rename(columns={'barrio': 'name'})
+    # Unir con totales
+    res = res.merge(totales, on=col_geo, how='left')
     
-    return clean_df_for_json(res[['name', 'value']])
+    # Formato final para ECharts [{"name": "Barrio/Comuna", "value": X, "total_estudiantes": Y}]
+    res = res.dropna(subset=['value'])
+    # NO FILTRAMOS AQUÍ: Enviamos todo para que el frontend separe Medellín de otros municipios
+    res = res.rename(columns={col_geo: 'name'})
+    
+    return clean_df_for_json(res[['name', 'value', 'total_estudiantes']])
 
 @app.get("/api/materias-list")
 def get_materias_list():
