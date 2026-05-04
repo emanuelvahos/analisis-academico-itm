@@ -18,35 +18,37 @@ function actualizarDashboard() {
 
 // 3. Función de Carga de Datos (Core)
 async function loadData(semestre) {
+    console.log("--- Iniciando carga de datos defensiva ---");
     // Mostrar estado de carga visual en los charts
-    if (heatmapChart) heatmapChart.showLoading();
-    if (teachersChart) teachersChart.showLoading();
-    if (adaptacionChart) adaptacionChart.showLoading();
-    if (brechaChart) brechaChart.showLoading();
-    if (materiasChart) materiasChart.showLoading();
-    if (sedesChart) sedesChart.showLoading();
-    if (jornadaChart) jornadaChart.showLoading();
-    if (mapaChart) mapaChart.showLoading();
+    [heatmapChart, teachersChart, adaptacionChart, brechaChart, materiasChart, sedesChart, jornadaChart, mapaChart].forEach(c => c && c.showLoading());
 
+    // A. Fetch KPIs
     try {
-        // A. Fetch KPIs
+        console.log("Cargando sección: KPIs...");
         const kpiRes = await fetch(`${API_BASE}/kpis?semestre=${semestre}`);
         const kpiData = await kpiRes.json();
 
-        document.getElementById('kpi-mortalidad').innerText = kpiData.mortalidad_global;
-        document.getElementById('kpi-estudiantes').innerText = kpiData.total_estudiantes.toLocaleString('es-CO');
+        if (document.getElementById('kpi-mortalidad')) document.getElementById('kpi-mortalidad').innerText = kpiData.mortalidad_global;
+        if (document.getElementById('kpi-estudiantes')) document.getElementById('kpi-estudiantes').innerText = kpiData.total_estudiantes.toLocaleString('es-CO');
 
-        // Actualizar el pie de la tarjeta de estudiantes con el contexto de "Fuera de Medellín"
-        const kpiEstFooter = document.querySelector('#kpi-estudiantes').closest('.card').querySelector('.foot');
-        if (kpiEstFooter) {
-            kpiEstFooter.innerHTML = `<strong>${kpiData.total_estudiantes.toLocaleString('es-CO')}</strong> Estudiantes Totales (${kpiData.fuera_de_medellin_o_sin_datos.toLocaleString('es-CO')} fuera de Medellín o sin barrio)`;
-        }
+        try {
+            const kpiEstFooter = document.querySelector('#kpi-estudiantes')?.closest('.card')?.querySelector('.foot');
+            if (kpiEstFooter) {
+                kpiEstFooter.innerHTML = `<strong>${kpiData.total_estudiantes.toLocaleString('es-CO')}</strong> 
+                    Estenciales Totales (${(kpiData.fuera_de_medellin_o_sin_datos || 0).toLocaleString('es-CO')} fuera de Medellín o sin barrio)`;
+            }
+        } catch (e) { console.warn('Fallo en footer KPI estudiantes:', e); }
 
-        document.getElementById('kpi-asignatura-nombre').innerText = kpiData.asignatura_critica.nombre;
-        document.getElementById('kpi-asignatura-pct').innerText = kpiData.asignatura_critica.porcentaje + '% de reprobación';
-        document.getElementById('page-title-text').innerText = `Resumen General · Periodo ${semestre}`;
+        if (document.getElementById('kpi-asignatura-nombre')) document.getElementById('kpi-asignatura-nombre').innerText = kpiData.asignatura_critica.nombre;
+        if (document.getElementById('kpi-asignatura-pct')) document.getElementById('kpi-asignatura-pct').innerText = kpiData.asignatura_critica.porcentaje + '% de reprobación';
+        if (document.getElementById('page-title-text')) document.getElementById('page-title-text').innerText = `Resumen General · Periodo ${semestre}`;
+    } catch (error) {
+        console.error("Fallo crítico en sección KPIs:", error);
+    }
 
-        // B. Fetch Heatmap
+    // B. Fetch Heatmap
+    try {
+        console.log("Cargando sección: Heatmap...");
         const heatmapRes = await fetch(`${API_BASE}/heatmap?semestre=${semestre}`);
         const heatmapRaw = await heatmapRes.json();
         const heatmapFormatted = heatmapRaw.map(item => {
@@ -55,23 +57,31 @@ async function loadData(semestre) {
             return [x, y, item.mortalidad];
         }).filter(item => item[0] !== -1 && item[1] !== -1);
         heatmapChart.setOption({ series: [{ data: heatmapFormatted }] });
+    } catch (error) {
+        console.error("Fallo en sección Heatmap:", error);
+    }
 
-        // C. Fetch Docentes
-        const materiaFilter = document.getElementById('materia-docente-filter').value;
+    // C. Fetch Docentes
+    try {
+        console.log("Cargando sección: Docentes...");
+        const materiaFilter = document.getElementById('materia-docente-filter')?.value || '';
         let teachersUrl = `${API_BASE}/teachers?semestre=${semestre}`;
         if (materiaFilter) teachersUrl += `&materia=${encodeURIComponent(materiaFilter)}`;
         const teachersRes = await fetch(teachersUrl);
         const teachersRaw = await teachersRes.json();
-        teachersRaw.reverse();
-        const teacherNames = teachersRaw.map(t => `${t.teacher_name}`);
-        const teacherValues = teachersRaw.map(t => t.tasa_mortalidad);
+        
+        // Usamos una copia para no alterar el original y evitar efectos secundarios
+        const teachersData = [...teachersRaw].reverse();
+        const teacherNames = teachersData.map(t => `${t.teacher_name}`);
+        const teacherValues = teachersData.map(t => t.tasa_mortalidad);
+        
         teachersChart.setOption({
             yAxis: { data: teacherNames },
             series: [{ data: teacherValues }],
             tooltip: {
                 formatter: function (params) {
                     const p = Array.isArray(params) ? params[0] : params;
-                    const original = teachersRaw[p.dataIndex];
+                    const original = teachersData[p.dataIndex];
                     const total = original.total_estudiantes || 0;
                     const porcentaje = p.value;
                     const afectados = Math.round(porcentaje * total);
@@ -81,8 +91,13 @@ async function loadData(semestre) {
                 }
             }
         });
+    } catch (error) {
+        console.error("Fallo en sección Docentes:", error);
+    }
 
-        // D. Fetch Adaptacion
+    // D. Fetch Adaptacion
+    try {
+        console.log("Cargando sección: Adaptación...");
         const adaptacionRes = await fetch(`${API_BASE}/adaptacion?semestre=${semestre}`);
         let adaptacionRaw = await adaptacionRes.json();
         if (!adaptacionRaw || adaptacionRaw.length === 0) {
@@ -94,8 +109,13 @@ async function loadData(semestre) {
             xAxis: { type: 'category', data: semestresLabels },
             series: [{ data: mortalidadesData }]
         });
+    } catch (error) {
+        console.error("Fallo en sección Adaptación:", error);
+    }
 
-        // E. Fetch Brecha de Género
+    // E. Fetch Brecha de Género
+    try {
+        console.log("Cargando sección: Brecha de Género...");
         const brechaRes = await fetch(`${API_BASE}/brecha-ciencias?semestre=${semestre}`);
         const brechaRaw = await brechaRes.json();
         brechaChart.setOption({
@@ -114,18 +134,23 @@ async function loadData(semestre) {
                 }
             }
         });
+    } catch (error) {
+        console.error("Fallo en sección Brecha:", error);
+    }
 
-        // F. Fetch Materias Filtro
+    // F. Fetch Materias Filtro
+    try {
+        console.log("Cargando sección: Materias Filtro...");
         const materiasRes = await fetch(`${API_BASE}/materias-filtro?semestre=${semestre}`);
         const materiasRaw = await materiasRes.json();
-        materiasRaw.reverse();
+        const materiasData = [...materiasRaw].reverse();
         materiasChart.setOption({
-            yAxis: { data: materiasRaw.map(m => m.asignatura) },
-            series: [{ data: materiasRaw.map(m => m.tasa_mortalidad) }],
+            yAxis: { data: materiasData.map(m => m.asignatura) },
+            series: [{ data: materiasData.map(m => m.tasa_mortalidad) }],
             tooltip: {
                 formatter: function (params) {
                     const p = Array.isArray(params) ? params[0] : params;
-                    const original = materiasRaw[p.dataIndex];
+                    const original = materiasData[p.dataIndex];
                     const total = original.total_estudiantes || 0;
                     const porcentaje = p.value;
                     const afectados = Math.round(porcentaje * total);
@@ -135,8 +160,13 @@ async function loadData(semestre) {
                 }
             }
         });
+    } catch (error) {
+        console.error("Fallo en sección Materias:", error);
+    }
 
-        // G. Fetch Sedes
+    // G. Fetch Sedes
+    try {
+        console.log("Cargando sección: Sedes...");
         const sedesRes = await fetch(`${API_BASE}/sedes?semestre=${semestre}`);
         const sedesRaw = await sedesRes.json();
         sedesChart.setOption({
@@ -155,36 +185,39 @@ async function loadData(semestre) {
                 }
             }
         });
+    } catch (error) {
+        console.error("Fallo en sección Sedes:", error);
+    }
 
-        // H. Fetch Jornada
+    // H. Fetch Jornada
+    try {
+        console.log("Cargando sección: Jornada...");
         const jornadaRes = await fetch(`${API_BASE}/jornada?semestre=${semestre}`);
         const jornadaRaw = await jornadaRes.json();
         jornadaChart.setOption({
             series: [{ data: jornadaRaw.map(j => ({ name: j.jornada, value: j.tasa_mortalidad, total: j.total_estudiantes })) }]
         });
+    } catch (error) {
+        console.error("Fallo en sección Jornada:", error);
+    }
 
-        // I. Fetch Rutas Transporte (Mapa)
+    // I. Fetch Rutas Transporte (Mapa)
+    try {
+        console.log("Cargando sección: Mapa de Rutas...");
         const mapaRes = await fetch(`${API_BASE}/rutas-transporte?semestre=${semestre}`);
         const mapaRaw = await mapaRes.json();
-        console.log("Datos del mapa:", mapaRaw);
-
+        
         const nodosMap = new Map();
         mapaRaw.forEach(ruta => {
-            // Registrar Origen (Comuna)
-            if (!nodosMap.has(ruta.origen)) {
-                nodosMap.set(ruta.origen, {
-                    name: ruta.origen,
-                    value: ruta.coords[0], // [lon, lat]
-                    isCampus: false
-                });
+            if (ruta.origen && ruta.coords?.[0]) {
+                if (!nodosMap.has(ruta.origen)) {
+                    nodosMap.set(ruta.origen, { name: ruta.origen, value: ruta.coords[0], isCampus: false });
+                }
             }
-            // Registrar Destino (Sede)
-            if (!nodosMap.has(ruta.destino)) {
-                nodosMap.set(ruta.destino, {
-                    name: ruta.destino,
-                    value: ruta.coords[1], // [lon, lat]
-                    isCampus: true
-                });
+            if (ruta.destino && ruta.coords?.[1]) {
+                if (!nodosMap.has(ruta.destino)) {
+                    nodosMap.set(ruta.destino, { name: ruta.destino, value: ruta.coords[1], isCampus: true });
+                }
             }
         });
 
@@ -197,31 +230,27 @@ async function loadData(semestre) {
                 shadowBlur: 10,
                 shadowColor: nodo.isCampus ? '#FF5722' : '#00B5E2'
             },
-            label: {
-                show: true,
-                position: 'right',
-                formatter: '{b}',
-                color: '#E2E8F0',
-                fontSize: 11,
-                fontWeight: nodo.isCampus ? 'bold' : 'normal'
-            }
+            label: { show: true, position: 'right', formatter: '{b}', color: '#E2E8F0', fontSize: 11, fontWeight: nodo.isCampus ? 'bold' : 'normal' }
         }));
 
         mapaChart.setOption({
-            series: [
-                { data: mapaRaw },
-                { data: scatterData }
-            ]
+            series: [{ data: mapaRaw }, { data: scatterData }]
         });
-
-        // J. Fetch KPI Fantasmas
-        cargarKPIFantasmas(semestre);
-
     } catch (error) {
-        console.error("Error al cargar los datos de la API:", error);
-    } finally {
-        [heatmapChart, teachersChart, adaptacionChart, brechaChart, materiasChart, sedesChart, jornadaChart, mapaChart].forEach(c => c && c.hideLoading());
+        console.error("Fallo en sección Mapa de Rutas:", error);
     }
+
+    // J. Fetch KPI Fantasmas
+    try {
+        console.log("Cargando sección: KPI Fantasmas...");
+        cargarKPIFantasmas(semestre);
+    } catch (error) {
+        console.error("Fallo en sección KPI Fantasmas:", error);
+    }
+
+    // Quitar estado de carga
+    [heatmapChart, teachersChart, adaptacionChart, brechaChart, materiasChart, sedesChart, jornadaChart, mapaChart].forEach(c => c && c.hideLoading());
+    console.log("--- Carga de datos finalizada ---");
 }
 
 // Función dedicada para el Mapa de Calor (GeoJSON)
