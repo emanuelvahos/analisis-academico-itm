@@ -11,6 +11,18 @@ from fastapi.responses import FileResponse, JSONResponse
 from dotenv import load_dotenv
 import unicodedata
 from supabase import create_client, Client
+import re
+
+def clean_geo_string(text: str) -> str:
+    if not isinstance(text, str): return ""
+    # 1. Quitar tildes
+    text = ''.join(c for c in unicodedata.normalize('NFD', text) if unicodedata.category(c) != 'Mn')
+    # 2. Minusculas y quitar caracteres especiales (guiones, comas, puntos)
+    text = re.sub(r'[^a-z0-9\s]', '', text.lower())
+    # 3. Quitar la palabra "barrio" o "comuna" si viene pegada
+    text = re.sub(r'\b(barrio|comuna)\b', '', text)
+    # 4. Quitar espacios dobles
+    return ' '.join(text.split())
 
 def remove_accents(text: str) -> str:
     if not isinstance(text, str): return ""
@@ -27,7 +39,7 @@ SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
 try:
     # Carga del CSV oficial de barrios y veredas
     df_coords_csv = pd.read_csv('Barrios y veredas de Medellín.csv')
-    COORDS_CSV = {remove_accents(str(row['Name']).lower().strip()): [row['Longitude'], row['Latitude']] for _, row in df_coords_csv.iterrows()}
+    COORDS_CSV = {clean_geo_string(str(row['Name'])): [row['Longitude'], row['Latitude']] for _, row in df_coords_csv.iterrows()}
 except Exception as e:
     print(f"Error cargando CSV de coordenadas: {e}")
     COORDS_CSV = {}
@@ -43,8 +55,10 @@ COORDS_SEDES = {
     'floresta': [-75.590, 6.258]
 }
 
+MUNICIPIOS_EXTERNOS = ['bello', 'itagui', 'envigado', 'sabaneta', 'copacabana', 'girardota', 'caldas', 'la estrella', 'barbosa', 'rionegro', 'apartado', 'marinilla']
+
 # Diccionario maestro unificado (Prioridad a sedes si hay colisión)
-COORDS_SAFE = {**COORDS_CSV, **COORDS_SEDES}
+COORDS_SAFE = {**COORDS_CSV, **{clean_geo_string(k): v for k, v in COORDS_SEDES.items()}}
 
 app = FastAPI(title="API Dashboard ITM")
 
@@ -219,11 +233,14 @@ def get_kpi_fantasmas(semestre: str = None):
 @app.get("/api/heatmap")
 def get_heatmap(semestre: str = "2025-2"):
     try:
-        sb = get_supabase_client()
-        data = sb.table('academic_performance').select('student_id, final_grade, class_groups!inner(semester, group_schedules(start_time, day_of_week))').eq('class_groups.semester', semestre).limit(100000).execute().data or []
+        data = supabase_fetch_all('academic_performance', 'student_id, final_grade, class_groups!inner(semester, group_schedules(start_time, day_of_week))', {'class_groups.semester': semestre})
         if not data: return []
         df = pd.DataFrame(data)
-        df['final_grade'] = pd.to_numeric(df['final_grade'], errors='coerce').fillna(0)
+        # 1. Normalizar notas (por si vienen con coma colombiana) y quitar nulos
+        df['final_grade'] = df['final_grade'].astype(str).str.replace(',', '.')
+        df['final_grade'] = pd.to_numeric(df['final_grade'], errors='coerce')
+        df = df.dropna(subset=['final_grade'])
+
         df['mortalidad'] = (df['final_grade'] < 3.0).astype(int)
         def extract_sched(row):
             cg = row.get('class_groups', {})
@@ -250,12 +267,11 @@ def get_heatmap(semestre: str = "2025-2"):
 @app.get("/api/teachers")
 def get_teachers(semestre: str = "2025-2", materia: str = None):
     try:
-        sb = get_supabase_client()
         sel = 'student_id, final_grade, class_groups!inner(semester, subjects(name), teachers(full_name))'
-        q = sb.table('academic_performance').select(sel).eq('class_groups.semester', semestre)
+        filters = {'class_groups.semester': semestre}
         if materia:
-            q = q.eq('class_groups.subjects.name', materia)
-        data = q.limit(100000).execute().data or []
+            filters['class_groups.subjects.name'] = materia
+        data = supabase_fetch_all('academic_performance', sel, filters)
         if not data: return []
         df = pd.DataFrame(data)
         # Navegación segura con `or {}` para evitar NoneType.get()
@@ -281,6 +297,8 @@ def get_teachers(semestre: str = "2025-2", materia: str = None):
 
         min_est = 3 if materia else 5
         stats = stats[stats['total_estudiantes'] >= min_est].sort_values('tasa_mortalidad', ascending=False).head(15)
+        
+        # 4. Retornar con las llaves originales que consume main.js
         return clean_df_for_json(stats)
     except Exception as e:
         print(f"Error teachers: {e}")
@@ -314,8 +332,7 @@ def get_adaptacion(semestre: str = "2025-2"):
 @app.get("/api/brecha-ciencias")
 def get_brecha_ciencias(semestre: str = "2025-2"):
     try:
-        sb = get_supabase_client()
-        data = sb.table('academic_performance').select('student_id, final_grade, class_groups!inner(semester, subjects(name))').eq('class_groups.semester', semestre).limit(100000).execute().data or []
+        data = supabase_fetch_all('academic_performance', 'student_id, final_grade, class_groups!inner(semester, subjects(name))', {'class_groups.semester': semestre})
         if not data: return []
         df = pd.DataFrame(data)
         df['subject_name'] = df['class_groups'].apply(lambda x: x.get('subjects', {}).get('name','') if isinstance(x,dict) else '')
@@ -339,7 +356,9 @@ def get_brecha_ciencias(semestre: str = "2025-2"):
 
         # 3. Calcular la tasa pura (SIN multiplicar por 100)
         stats['tasa_mortalidad'] = (stats['reprobados'] / stats['total_estudiantes']).round(4).fillna(0)
-        return clean_df_for_json(stats.rename(columns={'gender':'sexo'}))
+
+        # 4. Retornar con las llaves originales que consume main.js (sexo, tasa_mortalidad)
+        return clean_df_for_json(stats.rename(columns={'gender': 'sexo'}))
     except Exception as e:
         print(f"Error brecha: {e}")
         return JSONResponse(status_code=400, content={"error": str(e)})
@@ -347,8 +366,7 @@ def get_brecha_ciencias(semestre: str = "2025-2"):
 @app.get("/api/materias-filtro")
 def get_materias_filtro(semestre: str = "2025-2"):
     try:
-        sb = get_supabase_client()
-        data = sb.table('academic_performance').select('student_id, final_grade, class_groups!inner(semester, subjects(name))').eq('class_groups.semester', semestre).limit(100000).execute().data or []
+        data = supabase_fetch_all('academic_performance', 'student_id, final_grade, class_groups!inner(semester, subjects(name))', {'class_groups.semester': semestre})
         if not data: return []
         df = pd.DataFrame(data)
         df['subject_name'] = df['class_groups'].apply(lambda x: x.get('subjects',{}).get('name','') if isinstance(x,dict) else '')
@@ -369,7 +387,9 @@ def get_materias_filtro(semestre: str = "2025-2"):
         stats['tasa_mortalidad'] = (stats['reprobados'] / stats['total_estudiantes']).round(4).fillna(0)
 
         stats = stats[stats['total_estudiantes']>=30].sort_values('tasa_mortalidad', ascending=False).head(10)
-        return clean_df_for_json(stats.rename(columns={'subject_name':'asignatura'}))
+        
+        # 4. Retornar con las llaves originales que consume main.js (asignatura, tasa_mortalidad)
+        return clean_df_for_json(stats.rename(columns={'subject_name': 'asignatura'}))
     except Exception as e:
         print(f"Error materias-filtro: {e}")
         return JSONResponse(status_code=400, content={"error": str(e)})
@@ -377,8 +397,7 @@ def get_materias_filtro(semestre: str = "2025-2"):
 @app.get("/api/sedes")
 def get_sedes(semestre: str = "2025-2"):
     try:
-        sb = get_supabase_client()
-        data = sb.table('academic_performance').select('student_id, final_grade, class_groups!inner(semester)').eq('class_groups.semester', semestre).limit(100000).execute().data or []
+        data = supabase_fetch_all('academic_performance', 'student_id, final_grade, class_groups!inner(semester)', {'class_groups.semester': semestre})
         if not data: return []
         df = pd.DataFrame(data)
         data_s = supabase_fetch_all('students', 'id, campus_id')
@@ -403,7 +422,9 @@ def get_sedes(semestre: str = "2025-2"):
         stats['tasa_mortalidad'] = (stats['reprobados'] / stats['total_estudiantes']).round(4).fillna(0)
 
         stats = stats[stats['total_estudiantes']>=10].sort_values('tasa_mortalidad', ascending=False)
-        return clean_df_for_json(stats[['sede','total_estudiantes','tasa_mortalidad']])
+        
+        # 4. Retornar con las llaves originales que consume main.js (sede, tasa_mortalidad)
+        return clean_df_for_json(stats[['sede', 'total_estudiantes', 'reprobados', 'tasa_mortalidad']])
     except Exception as e:
         print(f"Error sedes: {e}")
         return JSONResponse(status_code=400, content={"error": str(e)})
@@ -411,8 +432,7 @@ def get_sedes(semestre: str = "2025-2"):
 @app.get("/api/jornada")
 def get_jornada(semestre: str = "2025-2"):
     try:
-        sb = get_supabase_client()
-        data = sb.table('academic_performance').select('student_id, final_grade, class_groups!inner(semester, group_schedules(start_time))').eq('class_groups.semester', semestre).limit(100000).execute().data or []
+        data = supabase_fetch_all('academic_performance', 'student_id, final_grade, class_groups!inner(semester, group_schedules(start_time))', {'class_groups.semester': semestre})
         if not data: return []
         df = pd.DataFrame(data)
         def get_hora(row):
@@ -441,6 +461,8 @@ def get_jornada(semestre: str = "2025-2"):
 
         # 3. Calcular la tasa pura (SIN multiplicar por 100)
         stats['tasa_mortalidad'] = (stats['reprobados'] / stats['total_estudiantes']).round(4).fillna(0)
+        
+        # 4. Retornar con las llaves originales que consume main.js (jornada, tasa_mortalidad)
         return clean_df_for_json(stats)
     except Exception as e:
         print(f"Error jornada: {e}")
@@ -466,17 +488,22 @@ def get_rutas_transporte(semestre: str = "2025-2"):
         df_s = df_s[df_s['student_id'].isin(student_ids)].copy()
         df_s = df_s.merge(df_c, on='campus_id', how='left')
         
-        # Normalizar barrio y comuna: minusculas, sin espacios extremos
-        df_s['barrio'] = df_s['barrio'].fillna('').astype(str).str.strip()
-        df_s['comuna'] = df_s['comuna'].fillna('').astype(str).str.strip()
+        # Normalizar sede_name
         df_s['sede_name'] = df_s['sede_name'].fillna('').astype(str).str.strip()
         
-        rutas = df_s.groupby(['barrio','sede_name','comuna']).size().reset_index(name='cantidad')
+        # Limpiar geografía y agrupar externos
+        df_s['barrio_limpio'] = df_s['barrio'].fillna('').astype(str).apply(clean_geo_string)
+        df_s.loc[df_s['barrio_limpio'].isin(MUNICIPIOS_EXTERNOS), 'barrio_limpio'] = 'Otro Municipio'
+        df_s.loc[df_s['comuna'].astype(str).str.lower().str.contains('|'.join(MUNICIPIOS_EXTERNOS), na=False), 'barrio_limpio'] = 'Otro Municipio'
+        
+        df_s['comuna_limpia'] = df_s['comuna'].fillna('').astype(str).apply(clean_geo_string)
+        
+        rutas = df_s.groupby(['barrio_limpio','sede_name','comuna_limpia']).size().reset_index(name='cantidad')
         rutas = rutas[rutas['cantidad'] > 0]
         
-        rutas['barrio_norm'] = rutas['barrio'].str.lower().str.strip().apply(remove_accents)
-        rutas['comuna_norm'] = rutas['comuna'].str.lower().str.strip().apply(remove_accents)
-        rutas['destino_norm'] = rutas['sede_name'].str.lower().str.strip().apply(remove_accents)
+        rutas['barrio_norm'] = rutas['barrio_limpio']
+        rutas['comuna_norm'] = rutas['comuna_limpia']
+        rutas['destino_norm'] = rutas['sede_name'].str.lower().str.strip().apply(clean_geo_string)
         
         # Debug: mostrar las claves disponibles y qué barrios hay
         print(f"[DEBUG rutas] Barrios únicos (muestra): {rutas['barrio_norm'].unique()[:5].tolist()}")
@@ -494,7 +521,7 @@ def get_rutas_transporte(semestre: str = "2025-2"):
         
         result = []
         for _, row in df_limpio.iterrows():
-            origen_display = str(row['barrio']).title() if row['barrio'] else str(row['comuna']).title()
+            origen_display = str(row['barrio_limpio']).title() if row['barrio_limpio'] else str(row['comuna_limpia']).title()
             result.append({
                 "coords": [row['origen_coords'], row['destino_coords']],
                 "value": int(row['cantidad']),
@@ -522,11 +549,14 @@ def get_mapa_poligonos(semestre: str = "2025-2", metrica: str = 'poblacion', niv
         # 2. Solo los estudiantes activos en ese semestre
         student_ids_activos = list({r['student_id'] for r in data_perf})
         
-        # 3. Datos geográficos de todos los estudiantes (limitado a 100k)
-        data_s = supabase_fetch_all('students', f'id, {col_geo}')
+        # 3. Datos geográficos de todos los estudiantes
+        data_s = supabase_fetch_all('students', 'id, barrio, comuna')
         
         df_p = pd.DataFrame(data_perf)
-        df_p['final_grade'] = pd.to_numeric(df_p['final_grade'], errors='coerce').fillna(0)
+        # 1. Normalizar notas (por si vienen con coma colombiana) y quitar nulos
+        df_p['final_grade'] = df_p['final_grade'].astype(str).str.replace(',', '.')
+        df_p['final_grade'] = pd.to_numeric(df_p['final_grade'], errors='coerce')
+        df_p = df_p.dropna(subset=['final_grade'])
         
         # Filtrar students al universo del semestre
         df_s = pd.DataFrame(data_s).rename(columns={'id': 'student_id'})
@@ -535,9 +565,21 @@ def get_mapa_poligonos(semestre: str = "2025-2", metrica: str = 'poblacion', niv
         # 4. JOIN: unir notas con barrio/comuna del estudiante
         df = df_p.merge(df_s, on='student_id', how='left')
         
+        # Limpiar geografía y agrupar externos
+        df['barrio_limpio'] = df['barrio'].fillna('').astype(str).apply(clean_geo_string)
+        df.loc[df['barrio_limpio'].isin(MUNICIPIOS_EXTERNOS), 'barrio_limpio'] = 'Otro Municipio'
+        # Intentar atrapar externos desde la comuna si el barrio no lo indicó
+        if 'comuna' in df.columns:
+            df.loc[df['comuna'].astype(str).str.lower().str.contains('|'.join(MUNICIPIOS_EXTERNOS), na=False), 'barrio_limpio'] = 'Otro Municipio'
+            df['comuna_limpia'] = df['comuna'].fillna('').astype(str).apply(clean_geo_string)
+            df.loc[df['comuna_limpia'].isin(MUNICIPIOS_EXTERNOS), 'comuna_limpia'] = 'Otro Municipio'
+            df['comuna'] = df['comuna_limpia']
+            
+        df['barrio'] = df['barrio_limpio']
+
         # 5. Normalizar a MAYUSCULAS para cruzar con GeoJSON
         df[col_geo] = df[col_geo].fillna('DESCONOCIDO').astype(str).str.upper().str.strip()
-        df.loc[df[col_geo].isin(['NAN','NONE','','** DESCONOCIDA **']), col_geo] = 'DESCONOCIDO'
+        df.loc[df[col_geo].isin(['NAN','NONE','','** DESCONOCIDA **', 'DESCONOCIDO']), col_geo] = 'DESCONOCIDO'
         
         totales = df.groupby(col_geo)['student_id'].nunique().reset_index(name='total_estudiantes')
         
@@ -546,12 +588,14 @@ def get_mapa_poligonos(semestre: str = "2025-2", metrica: str = 'poblacion', niv
         elif metrica == 'aprobacion':
             df['aprobado'] = (df['final_grade'] >= 3.0).astype(int)
             agg = df.groupby(col_geo).agg(aprobados=('aprobado','sum'), total=('aprobado','count')).reset_index()
-            agg['value'] = np.where(agg['total']>0, (agg['aprobados']/agg['total'])*100, 0.0).round(1)
+            agg['value'] = np.where(agg['total']>0, (agg['aprobados']/agg['total']), 0.0)
+            agg['value'] = agg['value'].round(4)
             res = agg[[col_geo,'value']]
         elif metrica == 'riesgo':
             df['perdio'] = (df['final_grade'] < 3.0).astype(int)
             agg = df.groupby(col_geo).agg(reprobados=('perdio','sum'), total=('perdio','count')).reset_index()
-            agg['value'] = np.where(agg['total']>0, (agg['reprobados']/agg['total'])*100, 0.0).round(1)
+            agg['value'] = np.where(agg['total']>0, (agg['reprobados']/agg['total']), 0.0)
+            agg['value'] = agg['value'].round(4)
             res = agg[[col_geo,'value']]
         else:
             return []
