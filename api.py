@@ -13,20 +13,39 @@ import unicodedata
 from supabase import create_client, Client
 import re
 
-def clean_geo_string(text: str) -> str:
+def clean_geo(text):
     if not isinstance(text, str): return ""
-    # 1. Quitar tildes
+    # Quitar tildes
     text = ''.join(c for c in unicodedata.normalize('NFD', text) if unicodedata.category(c) != 'Mn')
-    # 2. Minusculas y quitar caracteres especiales (guiones, comas, puntos)
-    text = re.sub(r'[^a-z0-9\s]', '', text.lower())
-    # 3. Quitar la palabra "barrio" o "comuna" si viene pegada
-    text = re.sub(r'\b(barrio|comuna)\b', '', text)
-    # 4. Quitar espacios dobles
+    text = text.lower()
+    # Quitar caracteres especiales y palabras basura
+    text = re.sub(r'[^a-z0-9\s]', ' ', text)
+    text = re.sub(r'\b(barrio|comuna|vereda|corregimiento)\b', '', text)
     return ' '.join(text.split())
 
-def remove_accents(text: str) -> str:
-    if not isinstance(text, str): return ""
-    return ''.join(c for c in unicodedata.normalize('NFD', text) if unicodedata.category(c) != 'Mn')
+def unificar_ubicacion(row):
+    barrio = str(row.get('barrio', ''))
+    comuna = str(row.get('comuna', ''))
+    
+    if 'seleccionar' in barrio.lower() or 'desconocida' in comuna.lower():
+        return 'Desconocido'
+        
+    barrio_cln = clean_geo(barrio)
+    comuna_cln = clean_geo(comuna)
+    texto_unido = f"{barrio_cln} {comuna_cln}"
+    
+    # 1. Si detecta un municipio externo, unifica bajo ese nombre
+    for mun in MUNICIPIOS_EXTERNOS:
+        if mun in texto_unido:
+            return mun.title() # Ej: 'Bello', 'Itagui'
+            
+    # 2. Si no es municipio externo, devuelve el barrio limpio para el cruce en Medellín
+    if barrio_cln:
+        return barrio_cln.title()
+    return 'Desconocido'
+
+def clean_geo_string(text: str) -> str:
+    return clean_geo(text)
 
 # Cargar variables de entorno
 print("Cargando .env...")
@@ -55,7 +74,7 @@ COORDS_SEDES = {
     'floresta': [-75.590, 6.258]
 }
 
-MUNICIPIOS_EXTERNOS = ['bello', 'itagui', 'envigado', 'sabaneta', 'copacabana', 'girardota', 'caldas', 'la estrella', 'barbosa', 'rionegro', 'apartado', 'marinilla']
+MUNICIPIOS_EXTERNOS = ['bello', 'itagui', 'envigado', 'copacabana', 'sabaneta', 'caldas', 'la estrella', 'girardota', 'barbosa', 'guarne', 'rionegro', 'el penol', 'san pedro', 'bogota', 'duitama', 'marinilla', 'gomez plata', 'san jeronimo', 'caucasia', 'la ceja', 'quibdo', 'pasto', 'retiro', 'yarumal', 'cali', 'frontino']
 
 # Diccionario maestro unificado (Prioridad a sedes si hay colisión)
 COORDS_SAFE = {**COORDS_CSV, **{clean_geo_string(k): v for k, v in COORDS_SEDES.items()}}
@@ -295,8 +314,7 @@ def get_teachers(semestre: str = "2025-2", materia: str = None):
         # 3. Calcular la tasa pura (SIN multiplicar por 100)
         stats['tasa_mortalidad'] = (stats['reprobados'] / stats['total_estudiantes']).round(4).fillna(0)
 
-        min_est = 3 if materia else 5
-        stats = stats[stats['total_estudiantes'] >= min_est].sort_values('tasa_mortalidad', ascending=False).head(15)
+        stats = stats[stats['total_estudiantes'] >= 40].sort_values('tasa_mortalidad', ascending=False).head(15)
         
         # 4. Retornar con las llaves originales que consume main.js
         return clean_df_for_json(stats)
@@ -397,11 +415,11 @@ def get_materias_filtro(semestre: str = "2025-2"):
 @app.get("/api/sedes")
 def get_sedes(semestre: str = "2025-2"):
     try:
-        data = supabase_fetch_all('academic_performance', 'student_id, final_grade, class_groups!inner(semester)', {'class_groups.semester': semestre})
+        data = supabase_fetch_all('academic_performance', 'student_id, final_grade, class_groups(semester)', {'class_groups.semester': semestre})
         if not data: return []
         df = pd.DataFrame(data)
         data_s = supabase_fetch_all('students', 'id, campus_id')
-        data_c = sb.table('campuses').select('id, name').limit(100000).execute().data or []
+        data_c = supabase_fetch_all('campuses', 'id, name')
         df_s = pd.DataFrame(data_s).rename(columns={'id':'student_id'})
         df_c = pd.DataFrame(data_c).rename(columns={'id':'campus_id','name':'sede'})
         df_s = df_s.merge(df_c, on='campus_id', how='left')
@@ -473,13 +491,13 @@ def get_rutas_transporte(semestre: str = "2025-2"):
     try:
         sb = get_supabase_client()
         # Obtener estudiantes activos en el semestre
-        data_perf = sb.table('academic_performance').select('student_id, class_groups!inner(semester)').eq('class_groups.semester', semestre).limit(100000).execute().data or []
+        data_perf = supabase_fetch_all('academic_performance', 'student_id, class_groups!inner(semester)', {'class_groups.semester': semestre})
         if not data_perf: return []
         student_ids = list({r['student_id'] for r in data_perf})
         
         # Traer datos geográficos de todos los estudiantes y filtrar en Python
         data_s = supabase_fetch_all('students', 'id, barrio, comuna, campus_id')
-        data_c = sb.table('campuses').select('id, name').limit(100000).execute().data or []
+        data_c = supabase_fetch_all('campuses', 'id, name')
         
         df_s = pd.DataFrame(data_s).rename(columns={'id': 'student_id'})
         df_c = pd.DataFrame(data_c).rename(columns={'id': 'campus_id', 'name': 'sede_name'})
@@ -491,19 +509,14 @@ def get_rutas_transporte(semestre: str = "2025-2"):
         # Normalizar sede_name
         df_s['sede_name'] = df_s['sede_name'].fillna('').astype(str).str.strip()
         
-        # Limpiar geografía y agrupar externos
-        df_s['barrio_limpio'] = df_s['barrio'].fillna('').astype(str).apply(clean_geo_string)
-        df_s.loc[df_s['barrio_limpio'].isin(MUNICIPIOS_EXTERNOS), 'barrio_limpio'] = 'Otro Municipio'
-        df_s.loc[df_s['comuna'].astype(str).str.lower().str.contains('|'.join(MUNICIPIOS_EXTERNOS), na=False), 'barrio_limpio'] = 'Otro Municipio'
+        # Aplicar unificación geográfica
+        df_s['ubicacion_final'] = df_s.apply(unificar_ubicacion, axis=1)
         
-        df_s['comuna_limpia'] = df_s['comuna'].fillna('').astype(str).apply(clean_geo_string)
-        
-        rutas = df_s.groupby(['barrio_limpio','sede_name','comuna_limpia']).size().reset_index(name='cantidad')
+        rutas = df_s.groupby(['ubicacion_final','sede_name']).size().reset_index(name='cantidad')
         rutas = rutas[rutas['cantidad'] > 0]
         
-        rutas['barrio_norm'] = rutas['barrio_limpio']
-        rutas['comuna_norm'] = rutas['comuna_limpia']
-        rutas['destino_norm'] = rutas['sede_name'].str.lower().str.strip().apply(clean_geo_string)
+        rutas['barrio_norm'] = rutas['ubicacion_final'].apply(clean_geo)
+        rutas['destino_norm'] = rutas['sede_name'].str.lower().str.strip().apply(clean_geo)
         
         # Debug: mostrar las claves disponibles y qué barrios hay
         print(f"[DEBUG rutas] Barrios únicos (muestra): {rutas['barrio_norm'].unique()[:5].tolist()}")
@@ -511,9 +524,6 @@ def get_rutas_transporte(semestre: str = "2025-2"):
         print(f"[DEBUG rutas] Claves COORDS_SAFE (muestra): {list(COORDS_SAFE.keys())[:5]}")
         
         rutas['origen_coords'] = rutas['barrio_norm'].map(COORDS_SAFE)
-        mask = rutas['origen_coords'].isna()
-        # Plan B: intentar por comuna
-        rutas.loc[mask, 'origen_coords'] = rutas.loc[mask, 'comuna_norm'].map(COORDS_SAFE)
         rutas['destino_coords'] = rutas['destino_norm'].map(COORDS_SAFE)
         
         df_limpio = rutas.dropna(subset=['origen_coords','destino_coords'])
@@ -521,12 +531,11 @@ def get_rutas_transporte(semestre: str = "2025-2"):
         
         result = []
         for _, row in df_limpio.iterrows():
-            origen_display = str(row['barrio_limpio']).title() if row['barrio_limpio'] else str(row['comuna_limpia']).title()
             result.append({
                 "coords": [row['origen_coords'], row['destino_coords']],
                 "value": int(row['cantidad']),
-                "origen": origen_display,
-                "destino": str(row['sede_name']).title()
+        "origen": str(row['ubicacion_final']),
+        "destino": str(row['sede_name']).title()
             })
         print(f"DEBUG: Rutas mapeadas: {len(result)}")
         return result
@@ -543,7 +552,7 @@ def get_mapa_poligonos(semestre: str = "2025-2", metrica: str = 'poblacion', niv
         col_geo = 'barrio' if nivel_geo == 'barrio' else 'comuna'
         
         # 1. Notas del semestre (grain: registro-nota)
-        data_perf = sb.table('academic_performance').select('student_id, final_grade, class_groups!inner(semester)').eq('class_groups.semester', semestre).limit(100000).execute().data or []
+        data_perf = supabase_fetch_all('academic_performance', 'student_id, final_grade, class_groups!inner(semester)', {'class_groups.semester': semestre})
         if not data_perf: return []
         
         # 2. Solo los estudiantes activos en ese semestre
@@ -565,20 +574,10 @@ def get_mapa_poligonos(semestre: str = "2025-2", metrica: str = 'poblacion', niv
         # 4. JOIN: unir notas con barrio/comuna del estudiante
         df = df_p.merge(df_s, on='student_id', how='left')
         
-        # Limpiar geografía y agrupar externos
-        df['barrio_limpio'] = df['barrio'].fillna('').astype(str).apply(clean_geo_string)
-        df.loc[df['barrio_limpio'].isin(MUNICIPIOS_EXTERNOS), 'barrio_limpio'] = 'Otro Municipio'
-        # Intentar atrapar externos desde la comuna si el barrio no lo indicó
-        if 'comuna' in df.columns:
-            df.loc[df['comuna'].astype(str).str.lower().str.contains('|'.join(MUNICIPIOS_EXTERNOS), na=False), 'barrio_limpio'] = 'Otro Municipio'
-            df['comuna_limpia'] = df['comuna'].fillna('').astype(str).apply(clean_geo_string)
-            df.loc[df['comuna_limpia'].isin(MUNICIPIOS_EXTERNOS), 'comuna_limpia'] = 'Otro Municipio'
-            df['comuna'] = df['comuna_limpia']
-            
-        df['barrio'] = df['barrio_limpio']
-
-        # 5. Normalizar a MAYUSCULAS para cruzar con GeoJSON
-        df[col_geo] = df[col_geo].fillna('DESCONOCIDO').astype(str).str.upper().str.strip()
+        # Aplicar unificación geográfica
+        df['ubicacion_final'] = df.apply(unificar_ubicacion, axis=1)
+        
+        df[col_geo] = df['ubicacion_final'].str.upper().str.strip()
         df.loc[df[col_geo].isin(['NAN','NONE','','** DESCONOCIDA **', 'DESCONOCIDO']), col_geo] = 'DESCONOCIDO'
         
         totales = df.groupby(col_geo)['student_id'].nunique().reset_index(name='total_estudiantes')
