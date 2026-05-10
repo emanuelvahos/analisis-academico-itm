@@ -627,7 +627,7 @@ def get_materias_list():
 
 @app.get("/")
 async def serve_index():
-    return FileResponse('public/index.html')
+    return FileResponse('index.html')
 
 app.mount("/", StaticFiles(directory="public"), name="public")
 
