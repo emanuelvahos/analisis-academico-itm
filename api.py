@@ -625,11 +625,21 @@ def get_materias_list():
         print(f"Error materias-list: {e}")
         return []
 
+# --- CONFIGURACIÓN DE ARCHIVOS ESTÁTICOS PARA PRODUCCIÓN ---
+current_dir = os.path.dirname(os.path.realpath(__file__))
+
+# 1. Montar archivos de lógica y estilos en /static
+app.mount("/static", StaticFiles(directory=os.path.join(current_dir, "static")), name="static")
+
+# 2. Montar carpeta public para assets y geojson (acceder como /assets/... o /medellin.geojson)
+app.mount("/public", StaticFiles(directory=os.path.join(current_dir, "public")), name="public")
+
 @app.get("/")
 async def serve_index():
-    return FileResponse('index.html')
+    return FileResponse(os.path.join(current_dir, 'index.html'))
 
-app.mount("/", StaticFiles(directory="public"), name="public")
+# Fallback para servir archivos desde public en la raíz (ej. /medellin.geojson)
+app.mount("/", StaticFiles(directory=os.path.join(current_dir, "public")), name="root_public")
 
 # ARRANQUE PARA RENDER
 if __name__ == "__main__":
