@@ -5,7 +5,7 @@ let currentMetrica = 'poblacion';
 let currentNivelGeo = 'barrio'; // Nivel inicial: Barrios
 let geojsonLoaded = false;
 
-const API_BASE = window.location.origin + '/api';
+const API_BASE = '/api';
 const days = ['Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado'];
 const hours = ['06:00-08:00', '08:00-10:00', '10:00-12:00', '12:00-14:00', '14:00-16:00', '16:00-18:00', '18:00-20:00', '20:00-22:00'];
 
@@ -594,7 +594,7 @@ document.addEventListener('DOMContentLoaded', () => {
             botonesSemestre.forEach(b => b.classList.remove('active'));
             const botonClickeado = e.currentTarget;
             botonClickeado.classList.add('active');
-            currentSemestre = botonClickeado.getAttribute('data-semestre') || botonClickeado.innerText.trim();
+            currentSemestre = botonClickeado.getAttribute('data-semester') || botonClickeado.innerText.trim();
             if (currentSemestre !== "Comparar") {
                 actualizarDashboard();
             }

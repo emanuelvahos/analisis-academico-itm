@@ -255,7 +255,7 @@ def run_etl_pipeline(file_path: str, chunk_size: int = 1000):
     logger.info("✅ Pipeline completado exitosamente.")
 
 if __name__ == "__main__":
-    archivo_objetivo = "Desarrollo_Curricular_2025_2.xlsx"
+    archivo_objetivo = "Desarrollo Curricular SIGA Semestre (2).xlsx"
     
     # Comprobación de existencia para evitar que el script falle silenciosamente
     if os.path.exists(archivo_objetivo):
