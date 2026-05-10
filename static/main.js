@@ -69,9 +69,9 @@ async function loadData(semestre) {
         if (materiaFilter) teachersUrl += `&materia=${encodeURIComponent(materiaFilter)}`;
         const teachersRes = await fetch(teachersUrl);
         const teachersRaw = await teachersRes.json();
-        
+
         const teachersData = [...teachersRaw].reverse();
-        
+
         teachersChart.setOption({
             yAxis: { data: teachersData.map(t => t.name) },
             series: [{ data: teachersData.map(t => ({ name: t.name, value: t.value, total_evaluaciones: t.total_evaluaciones, total_estudiantes_unicos: t.total_estudiantes_unicos, reprobados: t.reprobados })) }],
@@ -80,9 +80,9 @@ async function loadData(semestre) {
                 formatter: function (params) {
                     const d = params.data || params;
                     return `<b>${d.name}</b><br/>` +
-                           `Evaluaciones Totales: ${d.total_evaluaciones || 0}<br/>` +
-                           `Estudiantes Únicos: ${d.total_estudiantes_unicos || 0}<br/>` +
-                           `Mortalidad: ${((d.value || 0) * 100).toFixed(1)}%`;
+                        `Evaluaciones Totales: ${d.total_evaluaciones || 0}<br/>` +
+                        `Estudiantes Únicos: ${d.total_estudiantes_unicos || 0}<br/>` +
+                        `Mortalidad: ${((d.value || 0) * 100).toFixed(1)}%`;
                 }
             }
         });
@@ -106,9 +106,9 @@ async function loadData(semestre) {
                 formatter: function (params) {
                     const d = params.data || params;
                     return `<b>${d.name}</b><br/>` +
-                           `Evaluaciones Totales: ${d.total_evaluaciones || 0}<br/>` +
-                           `Estudiantes Únicos: ${d.total_estudiantes_unicos || 0}<br/>` +
-                           `Mortalidad: ${((d.value || 0) * 100).toFixed(1)}%`;
+                        `Evaluaciones Totales: ${d.total_evaluaciones || 0}<br/>` +
+                        `Estudiantes Únicos: ${d.total_estudiantes_unicos || 0}<br/>` +
+                        `Mortalidad: ${((d.value || 0) * 100).toFixed(1)}%`;
                 }
             }
         });
@@ -129,9 +129,9 @@ async function loadData(semestre) {
                 formatter: function (params) {
                     const d = params.data || params;
                     return `<b>${d.name}</b><br/>` +
-                           `Evaluaciones Totales: ${d.total_evaluaciones || 0}<br/>` +
-                           `Estudiantes Únicos: ${d.total_estudiantes_unicos || 0}<br/>` +
-                           `Mortalidad: ${((d.value || 0) * 100).toFixed(1)}%`;
+                        `Evaluaciones Totales: ${d.total_evaluaciones || 0}<br/>` +
+                        `Estudiantes Únicos: ${d.total_estudiantes_unicos || 0}<br/>` +
+                        `Mortalidad: ${((d.value || 0) * 100).toFixed(1)}%`;
                 }
             }
         });
@@ -153,9 +153,9 @@ async function loadData(semestre) {
                 formatter: function (params) {
                     const d = params.data || params;
                     return `<b>${d.name}</b><br/>` +
-                           `Evaluaciones Totales: ${d.total_evaluaciones || 0}<br/>` +
-                           `Estudiantes Únicos: ${d.total_estudiantes_unicos || 0}<br/>` +
-                           `Mortalidad: ${((d.value || 0) * 100).toFixed(1)}%`;
+                        `Evaluaciones Totales: ${d.total_evaluaciones || 0}<br/>` +
+                        `Estudiantes Únicos: ${d.total_estudiantes_unicos || 0}<br/>` +
+                        `Mortalidad: ${((d.value || 0) * 100).toFixed(1)}%`;
                 }
             }
         });
@@ -176,9 +176,9 @@ async function loadData(semestre) {
                 formatter: function (params) {
                     const d = params.data || params;
                     return `<b>${d.name}</b><br/>` +
-                           `Evaluaciones Totales: ${d.total_evaluaciones || 0}<br/>` +
-                           `Estudiantes Únicos: ${d.total_estudiantes_unicos || 0}<br/>` +
-                           `Mortalidad: ${((d.value || 0) * 100).toFixed(1)}%`;
+                        `Evaluaciones Totales: ${d.total_evaluaciones || 0}<br/>` +
+                        `Estudiantes Únicos: ${d.total_estudiantes_unicos || 0}<br/>` +
+                        `Mortalidad: ${((d.value || 0) * 100).toFixed(1)}%`;
                 }
             }
         });
@@ -191,7 +191,7 @@ async function loadData(semestre) {
         console.log("Cargando sección: Jornada...");
         const jornadaRes = await fetch(`${API_BASE}/jornada?semestre=${semestre}`);
         const jornadaRaw = await jornadaRes.json();
-        
+
         const totalEvaluaciones = jornadaRaw.reduce((sum, j) => sum + (j.total_evaluaciones || 0), 0);
         const contadorRegistros = document.getElementById('contador-registros');
         if (contadorRegistros) {
@@ -205,9 +205,9 @@ async function loadData(semestre) {
                 formatter: function (params) {
                     const d = params.data || params;
                     return `<b>${d.name}</b><br/>` +
-                           `Evaluaciones Totales: ${d.total_evaluaciones || 0}<br/>` +
-                           `Estudiantes Únicos: ${d.total_estudiantes_unicos || 0}<br/>` +
-                           `Mortalidad: ${((d.value || 0) * 100).toFixed(1)}%`;
+                        `Evaluaciones Totales: ${d.total_evaluaciones || 0}<br/>` +
+                        `Estudiantes Únicos: ${d.total_estudiantes_unicos || 0}<br/>` +
+                        `Mortalidad: ${((d.value || 0) * 100).toFixed(1)}%`;
                 }
             }
         });
@@ -220,7 +220,7 @@ async function loadData(semestre) {
         console.log("Cargando sección: Mapa de Rutas...");
         const mapaRes = await fetch(`${API_BASE}/rutas-transporte?semestre=${semestre}`);
         const mapaRaw = await mapaRes.json();
-        
+
         const nodosMap = new Map();
         mapaRaw.forEach(ruta => {
             if (ruta.origen && ruta.coords?.[0]) {
@@ -321,7 +321,7 @@ function cargarDatosGeoJSON(chartInstance) {
 
             // 2. Filtrar datos para el gráfico de otros municipios / desconocidos
             const otrosMunicipios = ['BELLO', 'ITAGUI', 'ENVIGADO', 'SABANETA', 'LA ESTRELLA', 'COPACABANA', 'GIRARDOTA', 'BARBOSA', 'CALDAS', 'DESCONOCIDA', 'UNKNOWN', '** DESCONOCIDA **'];
-            const datosParaGrafico = datosLimpios.filter(d => 
+            const datosParaGrafico = datosLimpios.filter(d =>
                 otrosMunicipios.some(m => d.name.includes(m)) || d.name === '' || d.name === 'NAN'
             ).sort((a, b) => b.value - a.value).slice(0, 10); // Top 10 otros
 
@@ -432,10 +432,10 @@ document.addEventListener('DOMContentLoaded', () => {
             formatter: function (params) {
                 const d = params.data || params;
                 return `<b>${d.name}</b><br/>` +
-                       `Evaluaciones Totales: <br/> +
+                    `Evaluaciones Totales: <br/> +
                            Estudiantes Únicos: ${d.total || 0}<br/>` +
-                       `Reprobados: ${d.reprobados || 0}<br/>` +
-                       `Mortalidad: ${((d.value || 0) * 100).toFixed(1)}%`;
+                    `Reprobados: ${d.reprobados || 0}<br/>` +
+                    `Mortalidad: ${((d.value || 0) * 100).toFixed(1)}%`;
             }
         },
         grid: { left: '3%', right: '10%', bottom: '3%', top: '5%', containLabel: true },
@@ -452,10 +452,10 @@ document.addEventListener('DOMContentLoaded', () => {
             formatter: function (params) {
                 const d = params.data || params;
                 return `<b>${d.name}</b><br/>` +
-                       `Evaluaciones Totales: <br/> +
+                    `Evaluaciones Totales: <br/> +
                            Estudiantes Únicos: ${d.total || 0}<br/>` +
-                       `Reprobados: ${d.reprobados || 0}<br/>` +
-                       `Mortalidad: ${((d.value || 0) * 100).toFixed(1)}%`;
+                    `Reprobados: ${d.reprobados || 0}<br/>` +
+                    `Mortalidad: ${((d.value || 0) * 100).toFixed(1)}%`;
             }
         },
         grid: { left: '5%', right: '5%', bottom: '5%', top: '10%', containLabel: true },
@@ -472,10 +472,10 @@ document.addEventListener('DOMContentLoaded', () => {
             formatter: function (params) {
                 const d = params.data || params;
                 return `<b>${d.name}</b><br/>` +
-                       `Evaluaciones Totales: <br/> +
+                    `Evaluaciones Totales: <br/> +
                            Estudiantes Únicos: ${d.total || 0}<br/>` +
-                       `Reprobados: ${d.reprobados || 0}<br/>` +
-                       `Mortalidad: ${((d.value || 0) * 100).toFixed(1)}%`;
+                    `Reprobados: ${d.reprobados || 0}<br/>` +
+                    `Mortalidad: ${((d.value || 0) * 100).toFixed(1)}%`;
             }
         },
         xAxis: { type: 'category', data: [] },
@@ -492,10 +492,10 @@ document.addEventListener('DOMContentLoaded', () => {
             formatter: function (params) {
                 const d = params.data || params;
                 return `<b>${d.name}</b><br/>` +
-                       `Evaluaciones Totales: <br/> +
+                    `Evaluaciones Totales: <br/> +
                            Estudiantes Únicos: ${d.total || 0}<br/>` +
-                       `Reprobados: ${d.reprobados || 0}<br/>` +
-                       `Mortalidad: ${((d.value || 0) * 100).toFixed(1)}%`;
+                    `Reprobados: ${d.reprobados || 0}<br/>` +
+                    `Mortalidad: ${((d.value || 0) * 100).toFixed(1)}%`;
             }
         },
         xAxis: { type: 'value', max: 1, axisLabel: { formatter: v => Math.round(v * 100) + '%' } },
@@ -511,10 +511,10 @@ document.addEventListener('DOMContentLoaded', () => {
             formatter: function (params) {
                 const d = params.data || params;
                 return `<b>${d.name}</b><br/>` +
-                       `Evaluaciones Totales: <br/> +
+                    `Evaluaciones Totales: <br/> +
                            Estudiantes Únicos: ${d.total || 0}<br/>` +
-                       `Reprobados: ${d.reprobados || 0}<br/>` +
-                       `Mortalidad: ${((d.value || 0) * 100).toFixed(1)}%`;
+                    `Reprobados: ${d.reprobados || 0}<br/>` +
+                    `Mortalidad: ${((d.value || 0) * 100).toFixed(1)}%`;
             }
         },
         xAxis: { type: 'category', data: [], axisLabel: { rotate: 30, interval: 0 } },
@@ -530,10 +530,10 @@ document.addEventListener('DOMContentLoaded', () => {
             formatter: function (params) {
                 const d = params.data || params;
                 return `<b>${d.name}</b><br/>` +
-                       `Evaluaciones Totales: <br/> +
+                    `Evaluaciones Totales: <br/> +
                            Estudiantes Únicos: ${d.total || 0}<br/>` +
-                       `Reprobados: ${d.reprobados || 0}<br/>` +
-                       `Mortalidad: ${((d.value || 0) * 100).toFixed(1)}%`;
+                    `Reprobados: ${d.reprobados || 0}<br/>` +
+                    `Mortalidad: ${((d.value || 0) * 100).toFixed(1)}%`;
             }
         },
         legend: { orient: 'vertical', left: 'left' },
@@ -602,6 +602,12 @@ document.addEventListener('DOMContentLoaded', () => {
             const botonClickeado = e.currentTarget;
             botonClickeado.classList.add('active');
             currentSemestre = botonClickeado.getAttribute('data-semester') || botonClickeado.innerText.trim();
+            
+            const titulo = document.getElementById('titulo-periodo');
+            if (titulo) {
+                titulo.innerText = `Resumen General · Periodo ${currentSemestre}`;
+            }
+            
             if (currentSemestre !== "Comparar") {
                 actualizarDashboard();
             }
@@ -645,26 +651,26 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 function cargarKPIFantasmas(semestre) {
     const url = semestre ? `${API_BASE}/kpi-fantasmas?semestre=${semestre}` : `${API_BASE}/kpi-fantasmas`;
-    
+
     fetch(url)
         .then(response => response.json())
         .then(data => {
-            if(data.error) {
+            if (data.error) {
                 console.error("Error desde el backend:", data.error);
                 document.getElementById('kpi-fantasmas-valor').innerText = 'Err';
                 return;
             }
-            
+
             // Si es evolución histórica (lista), tomamos el primero
             const res = Array.isArray(data) ? data[0] : data;
-            
+
             const fantasmas = res.estudiantes_fantasma || 0;
             const total = res.total_estudiantes || 0;
             const porcentaje = res.porcentaje || 0;
-            
+
             // Actualizar el valor principal
             document.getElementById('kpi-fantasmas-valor').innerText = fantasmas.toLocaleString('es-CO');
-            
+
             // Actualizar el subtexto informativo
             const subtextoEl = document.getElementById('kpi-fantasmas-subtexto');
             if (subtextoEl) {

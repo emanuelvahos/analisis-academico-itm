@@ -8,6 +8,9 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
+from fastapi_cache import FastAPICache
+from fastapi_cache.backends.inmemory import InMemoryBackend
+from fastapi_cache.decorator import cache
 from dotenv import load_dotenv
 import unicodedata
 from supabase import create_client, Client
@@ -32,29 +35,7 @@ except Exception as e:
     GEO_COMUNAS = {}
     GEO_BARRIOS = {}
 
-# --- SISTEMA DE CACHÉ EN MEMORIA ---
-_cache = {}
-
-def cache_response(expire=3600):
-    """Decorador para cachear respuestas de FastAPI en RAM"""
-    def decorator(func):
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            # Crear una clave única basada en el nombre de la función y sus argumentos
-            key = f"{func.__name__}:{args}:{kwargs}"
-            now = time.time()
-            
-            if key in _cache:
-                result, timestamp = _cache[key]
-                if now - timestamp < expire:
-                    return result
-            
-            # Ejecutar la función original
-            result = func(*args, **kwargs)
-            _cache[key] = (result, now)
-            return result
-        return wrapper
-    return decorator
+# Cache initialized at startup
 
 def clean_geo(text):
     if not isinstance(text, str): return ""
@@ -214,7 +195,7 @@ def calcular_mortalidad_sql(df, group_col, extra_cols=None):
 # --- ENDPOINTS ---
 
 @app.get("/api/kpis")
-@cache_response(expire=3600)
+@cache(expire=3600)
 def get_kpis(semestre: str = "2025-2"):
     try:
         sb = get_supabase_client()
@@ -278,7 +259,7 @@ def get_kpis(semestre: str = "2025-2"):
         return JSONResponse(status_code=400, content={"error": str(e)})
 
 @app.get("/api/kpi-fantasmas")
-@cache_response(expire=3600)
+@cache(expire=3600)
 def get_kpi_fantasmas(semestre: str = None):
     try:
         # 1. Consulta con JOIN (Inner Join) para acceder al semestre en class_groups
@@ -356,8 +337,12 @@ def get_kpi_fantasmas(semestre: str = None):
             content={"error": str(e), "estudiantes_fantasma": 0, "total_estudiantes": 0, "porcentaje": 0}
         )
 
+@app.on_event("startup")
+async def startup():
+    FastAPICache.init(InMemoryBackend(), prefix="fastapi-cache")
+
 @app.get("/api/heatmap")
-@cache_response(expire=3600)
+@cache(expire=3600)
 def get_heatmap(semestre: str = "2025-2"):
     try:
         data = supabase_fetch_all('academic_performance', 'student_id, final_grade, class_groups!inner(semester, group_schedules(start_time, day_of_week))', {'class_groups.semester': semestre})
@@ -392,7 +377,7 @@ def get_heatmap(semestre: str = "2025-2"):
         return JSONResponse(status_code=400, content={"error": str(e)})
 
 @app.get("/api/teachers")
-@cache_response(expire=3600)
+@cache(expire=3600)
 def get_teachers(semestre: str = "2025-2", materia: str = None):
     try:
         supabase = get_supabase_client()
@@ -407,29 +392,35 @@ def get_teachers(semestre: str = "2025-2", materia: str = None):
 
 
 @app.get("/api/adaptacion")
-@cache_response(expire=3600)
+@cache(expire=3600)
 def get_adaptacion(semestre: str = "2025-2"):
     try:
         supabase = get_supabase_client()
-        res = supabase.table('view_kpi_adaptacion').select('*').execute()
+        query = supabase.table('view_kpi_adaptacion').select('*')
+        if semestre:
+            query = query.eq('semester', semestre)
+        res = query.execute()
         return res.data
     except Exception as e:
         print(f"Error adaptacion view: {e}")
         return []
 
 @app.get("/api/brecha-ciencias")
-@cache_response(expire=3600)
+@cache(expire=3600)
 def get_brecha_ciencias(semestre: str = "2025-2"):
     try:
         supabase = get_supabase_client()
-        res = supabase.table('view_kpi_genero').select('*').execute()
+        query = supabase.table('view_kpi_genero').select('*')
+        if semestre:
+            query = query.eq('semester', semestre)
+        res = query.execute()
         return res.data
     except Exception as e:
         print(f"Error brecha view: {e}")
         return []
 
 @app.get("/api/materias-filtro")
-@cache_response(expire=3600)
+@cache(expire=3600)
 def get_materias_filtro(semestre: str = "2025-2"):
     try:
         data = supabase_fetch_all('academic_performance', 'student_id, final_grade, class_groups!inner(semester, subjects(name))', {'class_groups.semester': semestre})
@@ -447,7 +438,7 @@ def get_materias_filtro(semestre: str = "2025-2"):
         return JSONResponse(status_code=400, content={"error": str(e)})
 
 @app.get("/api/sedes")
-@cache_response(expire=3600)
+@cache(expire=3600)
 def get_sedes(semestre: str = "2025-2"):
     try:
         data = supabase_fetch_all('academic_performance', 'student_id, final_grade, class_groups(semester, subjects(name))', {'class_groups.semester': semestre})
@@ -474,18 +465,21 @@ def get_sedes(semestre: str = "2025-2"):
         return JSONResponse(status_code=400, content={"error": str(e)})
 
 @app.get("/api/jornada")
-@cache_response(expire=3600)
+@cache(expire=3600)
 def get_jornada(semestre: str = "2025-2"):
     try:
         supabase = get_supabase_client()
-        res = supabase.table('view_kpi_jornada').select('*').execute()
+        query = supabase.table('view_kpi_jornada').select('*')
+        if semestre:
+            query = query.eq('semester', semestre)
+        res = query.execute()
         return res.data
     except Exception as e:
         print(f"Error jornada view: {e}")
         return []
 
 @app.get("/api/rutas-transporte")
-@cache_response(expire=3600)
+@cache(expire=3600)
 def get_rutas_transporte(semestre: str = "2025-2"):
     try:
         sb = get_supabase_client()
@@ -545,7 +539,7 @@ def get_rutas_transporte(semestre: str = "2025-2"):
 
 
 @app.get("/api/mapa-poligonos")
-@cache_response(expire=3600)
+@cache(expire=3600)
 def get_mapa_poligonos(semestre: str = "2025-2", metrica: str = 'poblacion', nivel_geo: str = 'barrio'):
     try:
         sb = get_supabase_client()
