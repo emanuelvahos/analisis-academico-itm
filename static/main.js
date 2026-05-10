@@ -41,7 +41,7 @@ async function loadData(semestre) {
 
         if (document.getElementById('kpi-asignatura-nombre')) document.getElementById('kpi-asignatura-nombre').innerText = kpiData.asignatura_critica.nombre;
         if (document.getElementById('kpi-asignatura-pct')) document.getElementById('kpi-asignatura-pct').innerText = kpiData.asignatura_critica.porcentaje + '% de reprobación';
-        if (document.getElementById('page-title-text')) document.getElementById('page-title-text').innerText = `Resumen General · Periodo ${semestre}`;
+        if (document.getElementById('titulo-periodo')) document.getElementById('titulo-periodo').innerText = `Resumen General · Periodo ${semestre}`;
     } catch (error) {
         console.error("Fallo crítico en sección KPIs:", error);
     }
@@ -191,6 +191,13 @@ async function loadData(semestre) {
         console.log("Cargando sección: Jornada...");
         const jornadaRes = await fetch(`${API_BASE}/jornada?semestre=${semestre}`);
         const jornadaRaw = await jornadaRes.json();
+        
+        const totalEvaluaciones = jornadaRaw.reduce((sum, j) => sum + (j.total_evaluaciones || 0), 0);
+        const contadorRegistros = document.getElementById('contador-registros');
+        if (contadorRegistros) {
+            contadorRegistros.innerText = totalEvaluaciones.toLocaleString('es-CO');
+        }
+
         jornadaChart.setOption({
             series: [{ data: jornadaRaw.map(j => ({ name: j.name, value: j.value, total_evaluaciones: j.total_evaluaciones, total_estudiantes_unicos: j.total_estudiantes_unicos, reprobados: j.reprobados })) }],
             tooltip: {
