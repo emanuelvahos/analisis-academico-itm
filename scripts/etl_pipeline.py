@@ -25,6 +25,16 @@ def clean_column_names(columns: list) -> list:
     # Aseguramos que los nombres sean consistentes y sin caracteres especiales complejos
     return pd.Series(columns).astype(str).str.strip().str.lower().str.replace(' ', '_').str.replace('ñ', 'n').str.replace('ü', 'u').str.replace(r'[^\w\s]', '', regex=True).tolist()
 
+# --- NUEVO: FUNCIÓN DE LIMPIEZA DE TEXTOS ---
+def limpiar_texto(texto):
+    """Limpia nombres de materias, quitando dobles espacios y arreglando errores ortográficos como CALUCLO."""
+    if pd.isna(texto):
+        return "DESCONOCIDO"
+    texto = str(texto).upper().strip()
+    texto = ' '.join(texto.split()) # Quita dobles espacios
+    texto = texto.replace("CALUCLO", "CÁLCULO") # Parche para el error de Cálculo Diferencial
+    return texto
+
 def upsert_batch(table_name: str, records: list, conflict_columns: str):
     if not records: return
     
@@ -56,6 +66,10 @@ def process_and_upload(df_chunk: pd.DataFrame):
     for col in ['documento', 'grupo', 'codigo_asignatura']:
         if col in df.columns:
             df[col] = df[col].astype(str).str.replace('.0', '', regex=False).str.strip()
+
+    # --- NUEVO: APLICAR LIMPIEZA A LAS ASIGNATURAS ---
+    if 'asignatura' in df.columns:
+        df['asignatura'] = df['asignatura'].apply(limpiar_texto)
 
     if 'nombres_docente' in df.columns:
         df['docente_full_name'] = (df['nombres_docente'].fillna('') + ' ' + df['apellidos_docente'].fillna('')).str.strip()
@@ -130,7 +144,7 @@ def process_and_upload(df_chunk: pd.DataFrame):
         if 'stratum' in students_df.columns:
             students_df['stratum'] = pd.to_numeric(students_df['stratum'], errors='coerce').astype('Int64')
         
-        # Antigüedad como variable categórica (Nuevo, Antiguo, Admitido, etc.)
+        # Antigüedad como variable categórica
         if 'antiguedad' in students_df.columns:
             students_df['antiguedad'] = students_df['antiguedad'].astype(str).str.strip()
             students_df['antiguedad'] = students_df['antiguedad'].replace(['nan', 'NaN', 'None', '<NA>', ''], None)
@@ -196,7 +210,7 @@ def process_and_upload(df_chunk: pd.DataFrame):
         
         upsert_batch('group_schedules', sched_final.to_dict('records'), 'tenant_id, group_id, day_of_week, start_time')
 
-    # 8. ACADEMIC PERFORMANCE
+    # 8. ACADEMIC PERFORMANCE (NUEVO SISTEMA SEGURO ANTI-PÉRDIDAS)
     if 'definitiva' in df.columns:
         perf_df = df.copy()
         perf_df['semester'] = perf_df['ano'].astype(str).str.replace('.0','') + '-' + perf_df['semestre'].astype(str).str.replace('.0','')
@@ -205,12 +219,28 @@ def process_and_upload(df_chunk: pd.DataFrame):
         perf_df['group_id'] = list(zip(perf_df['grupo'], perf_df['subject_id'], perf_df['semester']))
         perf_df['group_id'] = perf_df['group_id'].map(map_groups)
         perf_df['student_id'] = perf_df['documento'].map(map_students)
-        perf_df['final_grade'] = pd.to_numeric(perf_df['definitiva'].astype(str).str.replace(',', '.'), errors='coerce').fillna(0.0)
+        perf_df['final_grade'] = pd.to_numeric(perf_df['definitiva'].astype(str).str.replace(',', '.'), errors='coerce')
         
-        perf_final = perf_df[['tenant_id', 'student_id', 'group_id', 'final_grade']].dropna().drop_duplicates(['tenant_id', 'student_id', 'group_id'])
+        # Conteo para el radar
+        filas_antes = len(perf_df)
+        
+        # Eliminamos SOLO si el estudiante o el grupo no existen en la BD. (No eliminamos si no hay nota)
+        perf_seguro = perf_df.dropna(subset=['student_id', 'group_id']).copy()
+        
+        filas_despues = len(perf_seguro)
+        perdidos = filas_antes - filas_despues
+        
+        # Alerta en consola si detectamos agujeros
+        if perdidos > 0:
+            logger.warning(f"⚠️ ALERTA DE DATOS: Se descartaron {perdidos} registros en este lote porque no cruzaron el 'student_id' o 'group_id'.")
+
+        perf_seguro['final_grade'] = perf_seguro['final_grade'].fillna(0.0)
+        
+        perf_final = perf_seguro[['tenant_id', 'student_id', 'group_id', 'final_grade']].drop_duplicates(['tenant_id', 'student_id', 'group_id'])
         upsert_batch('academic_performance', perf_final.to_dict('records'), 'tenant_id, student_id, group_id')
 
-def run_etl_pipeline(file_path: str, chunk_size: int = 500):
+# --- NUEVO: chunk_size aumentado a 1000 para mayor velocidad ---
+def run_etl_pipeline(file_path: str, chunk_size: int = 1000):
     wb = load_workbook(filename=file_path, read_only=True, data_only=True)
     ws = wb.active
     row_iterator = ws.iter_rows(values_only=True)
@@ -222,7 +252,14 @@ def run_etl_pipeline(file_path: str, chunk_size: int = 500):
             process_and_upload(pd.DataFrame(chunk, columns=headers))
             chunk = []
     if chunk: process_and_upload(pd.DataFrame(chunk, columns=headers))
-    logger.info("✅ Pipeline completado.")
+    logger.info("✅ Pipeline completado exitosamente.")
 
 if __name__ == "__main__":
-    run_etl_pipeline("Desarrollo Curricular SIGA Semestre (1).xlsx")
+    archivo_objetivo = "Desarrollo_Curricular_2025_2.xlsx"
+    
+    # Comprobación de existencia para evitar que el script falle silenciosamente
+    if os.path.exists(archivo_objetivo):
+        logger.info(f"🚀 Iniciando inyección con protección de datos: {archivo_objetivo}")
+        run_etl_pipeline(archivo_objetivo, chunk_size=1000)
+    else:
+        logger.error(f"❌ No se encontró el archivo '{archivo_objetivo}' en la carpeta actual.")

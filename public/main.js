@@ -70,24 +70,19 @@ async function loadData(semestre) {
         const teachersRes = await fetch(teachersUrl);
         const teachersRaw = await teachersRes.json();
         
-        // Usamos una copia para no alterar el original y evitar efectos secundarios
         const teachersData = [...teachersRaw].reverse();
-        const teacherNames = teachersData.map(t => `${t.teacher_name}`);
-        const teacherValues = teachersData.map(t => t.tasa_mortalidad);
         
         teachersChart.setOption({
-            yAxis: { data: teacherNames },
-            series: [{ data: teacherValues }],
+            yAxis: { data: teachersData.map(t => t.name) },
+            series: [{ data: teachersData.map(t => ({ name: t.name, value: t.value, total_evaluaciones: t.total_evaluaciones, total_estudiantes_unicos: t.total_estudiantes_unicos, reprobados: t.reprobados })) }],
             tooltip: {
+                trigger: 'item',
                 formatter: function (params) {
-                    const p = Array.isArray(params) ? params[0] : params;
-                    const original = teachersData[p.dataIndex];
-                    const total = original.total_estudiantes || 0;
-                    const porcentaje = p.value;
-                    const afectados = Math.round(porcentaje * total);
-                    return `<strong>${p.name}</strong><br/>
-                            Mortalidad: ${(porcentaje * 100).toFixed(1)}%<br/>
-                            ⚠️ <b>${afectados}</b> reprobados de <b>${total}</b> evaluados`;
+                    const d = params.data || params;
+                    return `<b>${d.name}</b><br/>` +
+                           `Evaluaciones Totales: ${d.total_evaluaciones || 0}<br/>` +
+                           `Estudiantes Únicos: ${d.total_estudiantes_unicos || 0}<br/>` +
+                           `Mortalidad: ${((d.value || 0) * 100).toFixed(1)}%`;
                 }
             }
         });
@@ -103,11 +98,19 @@ async function loadData(semestre) {
         if (!adaptacionRaw || adaptacionRaw.length === 0) {
             adaptacionRaw = Array.from({ length: 10 }, (_, i) => ({ semestre: i + 1, mortalidad: 0.45 - (i * 0.03) }));
         }
-        const semestresLabels = adaptacionRaw.map(item => 'Sem ' + item.semestre);
-        const mortalidadesData = adaptacionRaw.map(item => (item.mortalidad * 100).toFixed(1));
         adaptacionChart.setOption({
-            xAxis: { type: 'category', data: semestresLabels },
-            series: [{ data: mortalidadesData }]
+            xAxis: { type: 'category', data: adaptacionRaw.map(item => item.name) },
+            series: [{ data: adaptacionRaw.map(item => ({ name: item.name, value: item.value, total_evaluaciones: item.total_evaluaciones, total_estudiantes_unicos: item.total_estudiantes_unicos, reprobados: item.reprobados })) }],
+            tooltip: {
+                trigger: 'item',
+                formatter: function (params) {
+                    const d = params.data || params;
+                    return `<b>${d.name}</b><br/>` +
+                           `Evaluaciones Totales: ${d.total_evaluaciones || 0}<br/>` +
+                           `Estudiantes Únicos: ${d.total_estudiantes_unicos || 0}<br/>` +
+                           `Mortalidad: ${((d.value || 0) * 100).toFixed(1)}%`;
+                }
+            }
         });
     } catch (error) {
         console.error("Fallo en sección Adaptación:", error);
@@ -119,18 +122,16 @@ async function loadData(semestre) {
         const brechaRes = await fetch(`${API_BASE}/brecha-ciencias?semestre=${semestre}`);
         const brechaRaw = await brechaRes.json();
         brechaChart.setOption({
-            xAxis: { data: brechaRaw.map(item => item.sexo) },
-            series: [{ data: brechaRaw.map(item => item.tasa_mortalidad) }],
+            xAxis: { data: brechaRaw.map(item => item.name) },
+            series: [{ data: brechaRaw.map(item => ({ name: item.name, value: item.value, total_evaluaciones: item.total_evaluaciones, total_estudiantes_unicos: item.total_estudiantes_unicos, reprobados: item.reprobados })) }],
             tooltip: {
+                trigger: 'item',
                 formatter: function (params) {
-                    const p = Array.isArray(params) ? params[0] : params;
-                    const original = brechaRaw[p.dataIndex];
-                    const total = original.total_estudiantes || 0;
-                    const porcentaje = p.value;
-                    const afectados = Math.round(porcentaje * total);
-                    return `<strong>${p.name}</strong><br/>
-                            Mortalidad: ${(porcentaje * 100).toFixed(1)}%<br/>
-                            ⚠️ <b>${afectados}</b> reprobados de <b>${total}</b> evaluados`;
+                    const d = params.data || params;
+                    return `<b>${d.name}</b><br/>` +
+                           `Evaluaciones Totales: ${d.total_evaluaciones || 0}<br/>` +
+                           `Estudiantes Únicos: ${d.total_estudiantes_unicos || 0}<br/>` +
+                           `Mortalidad: ${((d.value || 0) * 100).toFixed(1)}%`;
                 }
             }
         });
@@ -145,18 +146,16 @@ async function loadData(semestre) {
         const materiasRaw = await materiasRes.json();
         const materiasData = [...materiasRaw].reverse();
         materiasChart.setOption({
-            yAxis: { data: materiasData.map(m => m.asignatura) },
-            series: [{ data: materiasData.map(m => m.tasa_mortalidad) }],
+            yAxis: { data: materiasData.map(m => m.name) },
+            series: [{ data: materiasData.map(m => ({ name: m.name, value: m.value, total_evaluaciones: m.total_evaluaciones, total_estudiantes_unicos: m.total_estudiantes_unicos, reprobados: m.reprobados })) }],
             tooltip: {
+                trigger: 'item',
                 formatter: function (params) {
-                    const p = Array.isArray(params) ? params[0] : params;
-                    const original = materiasData[p.dataIndex];
-                    const total = original.total_estudiantes || 0;
-                    const porcentaje = p.value;
-                    const afectados = Math.round(porcentaje * total);
-                    return `<strong>${p.name}</strong><br/>
-                            Mortalidad: ${(porcentaje * 100).toFixed(1)}%<br/>
-                            ⚠️ <b>${afectados}</b> reprobados de <b>${total}</b> evaluados`;
+                    const d = params.data || params;
+                    return `<b>${d.name}</b><br/>` +
+                           `Evaluaciones Totales: ${d.total_evaluaciones || 0}<br/>` +
+                           `Estudiantes Únicos: ${d.total_estudiantes_unicos || 0}<br/>` +
+                           `Mortalidad: ${((d.value || 0) * 100).toFixed(1)}%`;
                 }
             }
         });
@@ -170,18 +169,16 @@ async function loadData(semestre) {
         const sedesRes = await fetch(`${API_BASE}/sedes?semestre=${semestre}`);
         const sedesRaw = await sedesRes.json();
         sedesChart.setOption({
-            xAxis: { data: sedesRaw.map(s => s.sede) },
-            series: [{ data: sedesRaw.map(s => s.tasa_mortalidad) }],
+            xAxis: { data: sedesRaw.map(s => s.name) },
+            series: [{ data: sedesRaw.map(s => ({ name: s.name, value: s.value, total_evaluaciones: s.total_evaluaciones, total_estudiantes_unicos: s.total_estudiantes_unicos, reprobados: s.reprobados })) }],
             tooltip: {
+                trigger: 'item',
                 formatter: function (params) {
-                    const p = Array.isArray(params) ? params[0] : params;
-                    const original = sedesRaw[p.dataIndex];
-                    const total = original.total_estudiantes || 0;
-                    const porcentaje = p.value;
-                    const afectados = Math.round(porcentaje * total);
-                    return `<strong>${p.name}</strong><br/>
-                            Mortalidad: ${(porcentaje * 100).toFixed(1)}%<br/>
-                            ⚠️ <b>${afectados}</b> reprobados de <b>${total}</b> evaluados`;
+                    const d = params.data || params;
+                    return `<b>${d.name}</b><br/>` +
+                           `Evaluaciones Totales: ${d.total_evaluaciones || 0}<br/>` +
+                           `Estudiantes Únicos: ${d.total_estudiantes_unicos || 0}<br/>` +
+                           `Mortalidad: ${((d.value || 0) * 100).toFixed(1)}%`;
                 }
             }
         });
@@ -195,7 +192,17 @@ async function loadData(semestre) {
         const jornadaRes = await fetch(`${API_BASE}/jornada?semestre=${semestre}`);
         const jornadaRaw = await jornadaRes.json();
         jornadaChart.setOption({
-            series: [{ data: jornadaRaw.map(j => ({ name: j.jornada, value: j.tasa_mortalidad, total: j.total_estudiantes })) }]
+            series: [{ data: jornadaRaw.map(j => ({ name: j.name, value: j.value, total_evaluaciones: j.total_evaluaciones, total_estudiantes_unicos: j.total_estudiantes_unicos, reprobados: j.reprobados })) }],
+            tooltip: {
+                trigger: 'item',
+                formatter: function (params) {
+                    const d = params.data || params;
+                    return `<b>${d.name}</b><br/>` +
+                           `Evaluaciones Totales: ${d.total_evaluaciones || 0}<br/>` +
+                           `Estudiantes Únicos: ${d.total_estudiantes_unicos || 0}<br/>` +
+                           `Mortalidad: ${((d.value || 0) * 100).toFixed(1)}%`;
+                }
+            }
         });
     } catch (error) {
         console.error("Fallo en sección Jornada:", error);
@@ -411,7 +418,19 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     teachersChart.setOption({
-        tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' }, backgroundColor: 'rgba(15, 23, 42, 0.9)', textStyle: { color: '#fff' } },
+        tooltip: {
+            trigger: 'item',
+            backgroundColor: 'rgba(15, 23, 42, 0.9)',
+            textStyle: { color: '#fff' },
+            formatter: function (params) {
+                const d = params.data || params;
+                return `<b>${d.name}</b><br/>` +
+                       `Evaluaciones Totales: <br/> +
+                           Estudiantes Únicos: ${d.total || 0}<br/>` +
+                       `Reprobados: ${d.reprobados || 0}<br/>` +
+                       `Mortalidad: ${((d.value || 0) * 100).toFixed(1)}%`;
+            }
+        },
         grid: { left: '3%', right: '10%', bottom: '3%', top: '5%', containLabel: true },
         xAxis: { type: 'value', max: 1, axisLabel: { formatter: v => Math.round(v * 100) + '%' } },
         yAxis: { type: 'category', data: [], axisLabel: { interval: 0, width: 150, overflow: 'truncate' } },
@@ -419,7 +438,19 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     adaptacionChart.setOption({
-        tooltip: { trigger: 'axis', backgroundColor: 'rgba(15, 23, 42, 0.9)', textStyle: { color: '#fff' } },
+        tooltip: {
+            trigger: 'item',
+            backgroundColor: 'rgba(15, 23, 42, 0.9)',
+            textStyle: { color: '#fff' },
+            formatter: function (params) {
+                const d = params.data || params;
+                return `<b>${d.name}</b><br/>` +
+                       `Evaluaciones Totales: <br/> +
+                           Estudiantes Únicos: ${d.total || 0}<br/>` +
+                       `Reprobados: ${d.reprobados || 0}<br/>` +
+                       `Mortalidad: ${((d.value || 0) * 100).toFixed(1)}%`;
+            }
+        },
         grid: { left: '5%', right: '5%', bottom: '5%', top: '10%', containLabel: true },
         xAxis: { type: 'category', data: [] },
         yAxis: { type: 'value', axisLabel: { formatter: v => Math.round(v * 100) + '%' } },
@@ -427,7 +458,19 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     brechaChart.setOption({
-        tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' }, backgroundColor: 'rgba(15, 23, 42, 0.9)', textStyle: { color: '#fff' } },
+        tooltip: {
+            trigger: 'item',
+            backgroundColor: 'rgba(15, 23, 42, 0.9)',
+            textStyle: { color: '#fff' },
+            formatter: function (params) {
+                const d = params.data || params;
+                return `<b>${d.name}</b><br/>` +
+                       `Evaluaciones Totales: <br/> +
+                           Estudiantes Únicos: ${d.total || 0}<br/>` +
+                       `Reprobados: ${d.reprobados || 0}<br/>` +
+                       `Mortalidad: ${((d.value || 0) * 100).toFixed(1)}%`;
+            }
+        },
         xAxis: { type: 'category', data: [] },
         yAxis: { type: 'value', axisLabel: { formatter: v => Math.round(v * 100) + '%' } },
         legend: { show: true, bottom: 0, textStyle: { color: '#94a3b8' } },
@@ -435,21 +478,57 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     materiasChart.setOption({
-        tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' }, backgroundColor: 'rgba(15, 23, 42, 0.9)', textStyle: { color: '#fff' } },
+        tooltip: {
+            trigger: 'item',
+            backgroundColor: 'rgba(15, 23, 42, 0.9)',
+            textStyle: { color: '#fff' },
+            formatter: function (params) {
+                const d = params.data || params;
+                return `<b>${d.name}</b><br/>` +
+                       `Evaluaciones Totales: <br/> +
+                           Estudiantes Únicos: ${d.total || 0}<br/>` +
+                       `Reprobados: ${d.reprobados || 0}<br/>` +
+                       `Mortalidad: ${((d.value || 0) * 100).toFixed(1)}%`;
+            }
+        },
         xAxis: { type: 'value', max: 1, axisLabel: { formatter: v => Math.round(v * 100) + '%' } },
         yAxis: { type: 'category', data: [] },
         series: [{ type: 'bar', data: [], itemStyle: { color: '#dc2626' }, label: { show: true, position: 'right', formatter: p => (p.value * 100).toFixed(1) + '%' }, emphasis: { focus: 'series' } }]
     });
 
     sedesChart.setOption({
-        tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' }, backgroundColor: 'rgba(15, 23, 42, 0.9)', textStyle: { color: '#fff' } },
+        tooltip: {
+            trigger: 'item',
+            backgroundColor: 'rgba(15, 23, 42, 0.9)',
+            textStyle: { color: '#fff' },
+            formatter: function (params) {
+                const d = params.data || params;
+                return `<b>${d.name}</b><br/>` +
+                       `Evaluaciones Totales: <br/> +
+                           Estudiantes Únicos: ${d.total || 0}<br/>` +
+                       `Reprobados: ${d.reprobados || 0}<br/>` +
+                       `Mortalidad: ${((d.value || 0) * 100).toFixed(1)}%`;
+            }
+        },
         xAxis: { type: 'category', data: [], axisLabel: { rotate: 30, interval: 0 } },
         yAxis: { type: 'value', max: 1, axisLabel: { formatter: v => Math.round(v * 100) + '%' } },
         series: [{ type: 'bar', data: [], itemStyle: { color: '#7C3AED' }, label: { show: true, position: 'top', formatter: p => (p.value * 100).toFixed(1) + '%' }, emphasis: { focus: 'series' } }]
     });
 
     jornadaChart.setOption({
-        tooltip: { trigger: 'item', formatter: p => `<strong>${p.name}</strong><br/>Mortalidad: ${(p.value * 100).toFixed(1)}%<br/>Total: ${p.data.total}` },
+        tooltip: {
+            trigger: 'item',
+            backgroundColor: 'rgba(15, 23, 42, 0.9)',
+            textStyle: { color: '#fff' },
+            formatter: function (params) {
+                const d = params.data || params;
+                return `<b>${d.name}</b><br/>` +
+                       `Evaluaciones Totales: <br/> +
+                           Estudiantes Únicos: ${d.total || 0}<br/>` +
+                       `Reprobados: ${d.reprobados || 0}<br/>` +
+                       `Mortalidad: ${((d.value || 0) * 100).toFixed(1)}%`;
+            }
+        },
         legend: { orient: 'vertical', left: 'left' },
         series: [{ name: 'Jornada', type: 'pie', radius: '50%', data: [], label: { show: true, formatter: '{b}: {d}%' } }]
     });

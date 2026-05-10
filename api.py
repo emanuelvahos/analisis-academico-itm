@@ -12,6 +12,49 @@ from dotenv import load_dotenv
 import unicodedata
 from supabase import create_client, Client
 import re
+import time
+import asyncio
+from functools import wraps
+import json
+import difflib
+
+# --- CARGAR DICCIONARIOS OFICIALES DESDE GEOJSON ---
+try:
+    with open('medellin.geojson', 'r', encoding='utf-8') as f:
+        geo_data = json.load(f)
+    
+    # Extraer nombres únicos respetando la capitalización oficial del GeoJSON
+    GEO_COMUNAS = {f.get('properties', {}).get('nombre_comuna', '').upper(): f.get('properties', {}).get('nombre_comuna', '') for f in geo_data.get('features', []) if f.get('properties', {}).get('nombre_comuna')}
+    GEO_BARRIOS = {f.get('properties', {}).get('nombre_barrio', '').upper(): f.get('properties', {}).get('nombre_barrio', '') for f in geo_data.get('features', []) if f.get('properties', {}).get('nombre_barrio')}
+    print(f"Geo-Matching cargado: {len(GEO_COMUNAS)} comunas y {len(GEO_BARRIOS)} barrios detectados.")
+except Exception as e:
+    print(f"Advertencia: No se pudo cargar medellin.geojson para el mapeo estricto: {e}")
+    GEO_COMUNAS = {}
+    GEO_BARRIOS = {}
+
+# --- SISTEMA DE CACHÉ EN MEMORIA ---
+_cache = {}
+
+def cache_response(expire=3600):
+    """Decorador para cachear respuestas de FastAPI en RAM"""
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            # Crear una clave única basada en el nombre de la función y sus argumentos
+            key = f"{func.__name__}:{args}:{kwargs}"
+            now = time.time()
+            
+            if key in _cache:
+                result, timestamp = _cache[key]
+                if now - timestamp < expire:
+                    return result
+            
+            # Ejecutar la función original
+            result = func(*args, **kwargs)
+            _cache[key] = (result, now)
+            return result
+        return wrapper
+    return decorator
 
 def clean_geo(text):
     if not isinstance(text, str): return ""
@@ -46,6 +89,25 @@ def unificar_ubicacion(row):
 
 def clean_geo_string(text: str) -> str:
     return clean_geo(text)
+
+def emparejar_con_geojson(valor, tipo='comuna'):
+    """Emparejador inteligente para alinear BD con GeoJSON usando Búsqueda Exacta o Difusa (Fuzzy)"""
+    if not valor or pd.isna(valor) or str(valor).lower() in ['seleccionar', 'desconocido', '', 'nan', 'none']: 
+        return 'Desconocido'
+    
+    valor_upper = str(valor).upper().strip()
+    mapa_oficial = GEO_COMUNAS if tipo == 'comuna' else GEO_BARRIOS
+    
+    # 1. Búsqueda Exacta (ignorando mayúsculas)
+    if valor_upper in mapa_oficial:
+        return mapa_oficial[valor_upper] # Devuelve el nombre con la ortografía perfecta del GeoJSON
+        
+    # 2. Búsqueda Difusa (Fuzzy Matching) para corregir errores tipográficos (ej. "Moscu No.1")
+    matches = difflib.get_close_matches(valor_upper, mapa_oficial.keys(), n=1, cutoff=0.7)
+    if matches:
+        return mapa_oficial[matches[0]]
+        
+    return str(valor).title() # Fallback si no hay match razonable
 
 # Cargar variables de entorno
 print("Cargando .env...")
@@ -126,9 +188,33 @@ def flatten_join(row: dict, join_table: str) -> dict:
 
 
 
+def calcular_mortalidad_sql(df, group_col, extra_cols=None):
+    """Replica la lógica SQL: COUNT(DISTINCT student) y SUM(final_grade < 3.0)"""
+    df = df.copy()
+    # Normalizar notas
+    df['final_grade'] = df['final_grade'].astype(str).str.replace(',', '.')
+    df['final_grade'] = pd.to_numeric(df['final_grade'], errors='coerce')
+    df = df.dropna(subset=['final_grade'])
+    
+    agrupadores = [group_col] if extra_cols is None else [group_col] + extra_cols
+    
+    # Agrupación estricta
+    kpi_df = df.groupby(agrupadores).agg(
+        total_evaluaciones=('final_grade', 'count'),
+        total_estudiantes_unicos=('student_id', 'nunique'),
+        reprobados=('final_grade', lambda x: (x < 3.0).sum())
+    ).reset_index()
+    
+    # Tasa pura (0.0 a 1.0)
+    kpi_df['value'] = (kpi_df['reprobados'] / kpi_df['total_evaluaciones']).round(4).fillna(0)
+    kpi_df = kpi_df.rename(columns={group_col: 'name'})
+    
+    return kpi_df
+
 # --- ENDPOINTS ---
 
 @app.get("/api/kpis")
+@cache_response(expire=3600)
 def get_kpis(semestre: str = "2025-2"):
     try:
         sb = get_supabase_client()
@@ -155,14 +241,17 @@ def get_kpis(semestre: str = "2025-2"):
             # Extraer nombre de la materia (navegación segura)
             df['subject_name'] = df['class_groups'].apply(lambda x: x.get('subjects', {}).get('name', 'N/A') if isinstance(x, dict) else 'N/A')
             
-            # Agrupar para encontrar la de mayor mortalidad (Mínimo 10 estudiantes)
+            # Filtrar nivelatorios
+            df = df[~df['subject_name'].str.lower().str.contains('nivelatorio', na=False)]
+            
+            # Agrupar para encontrar la de mayor mortalidad (Mínimo 50 evaluaciones)
             subjects_stats = df.groupby('subject_name').agg(
                 total_estudiantes=('mortalidad', 'count'),
                 tasa_mortalidad=('mortalidad', 'mean')
             ).reset_index()
             
             # Filtro de muestra estadística
-            subjects_stats = subjects_stats[subjects_stats['total_estudiantes'] >= 10]
+            subjects_stats = subjects_stats[subjects_stats['total_estudiantes'] >= 50]
             
             if not subjects_stats.empty:
                 critica = subjects_stats.sort_values('tasa_mortalidad', ascending=False).iloc[0]
@@ -189,6 +278,7 @@ def get_kpis(semestre: str = "2025-2"):
         return JSONResponse(status_code=400, content={"error": str(e)})
 
 @app.get("/api/kpi-fantasmas")
+@cache_response(expire=3600)
 def get_kpi_fantasmas(semestre: str = None):
     try:
         # 1. Consulta con JOIN (Inner Join) para acceder al semestre en class_groups
@@ -207,38 +297,55 @@ def get_kpi_fantasmas(semestre: str = None):
             
         df = pd.DataFrame(data)
         
-        # Aplanar la estructura del JOIN: class_groups es un dict con {'semester': '...'}
-        df['semester'] = df['class_groups'].apply(lambda x: x['semester'] if isinstance(x, dict) else None)
-        # Limpieza de notas a numérico
-        df['final_grade'] = pd.to_numeric(df['final_grade'], errors='coerce').fillna(0)
+        # 1. Normalizar notas y eliminar nulos
+        df['final_grade'] = df['final_grade'].astype(str).str.replace(',', '.')
+        df['final_grade'] = pd.to_numeric(df['final_grade'], errors='coerce')
+        df = df.dropna(subset=['final_grade'])
         
+        # Aplanar semestre para agrupaciones
+        df['semester'] = df['class_groups'].apply(lambda x: x.get('semester') if isinstance(x, dict) else None)
+
         if semestre:
-            # Caso: Un solo semestre solicitado
-            total_estudiantes = df['student_id'].nunique()
-            max_grades = df.groupby('student_id')['final_grade'].max()
-            fantasmas = int((max_grades == 0).sum())
-            porcentaje = round((fantasmas / total_estudiantes) * 100, 1) if total_estudiantes > 0 else 0.0
+            # --- LÓGICA CORE (Semestre Específico) ---
+            # Agrupar por estudiante y sacar su nota máxima
+            max_grades = df.groupby('student_id')['final_grade'].max().reset_index()
+            # Filtrar a los que su nota máxima es estrictamente 0.0
+            fantasmas_ids = max_grades[max_grades['final_grade'] == 0.0]['student_id']
+            
+            # Registros de esos estudiantes
+            fantasmas_df = df[df['student_id'].isin(fantasmas_ids)]
+            
+            total_evaluaciones = len(fantasmas_df)
+            total_estudiantes_unicos = fantasmas_df['student_id'].nunique()
+            total_estudiantes_activos = df['student_id'].nunique()
             
             return {
-                "estudiantes_fantasma": fantasmas,
-                "total_estudiantes": int(total_estudiantes),
-                "porcentaje": porcentaje,
+                "name": "Estudiantes Fantasma",
+                "value": 1.0,  # Mortalidad 100%
+                "total_evaluaciones": int(total_evaluaciones),
+                "total_estudiantes_unicos": int(total_estudiantes_unicos),
+                "reprobados": int(total_evaluaciones),
+                "porcentaje_del_total": round((total_estudiantes_unicos / total_estudiantes_activos) * 100, 2) if total_estudiantes_activos > 0 else 0,
                 "semestre": semestre
             }
         else:
-            # Caso: Evolución histórica (todos los semestres disponibles)
+            # --- EVOLUCIÓN HISTÓRICA ---
             evolucion = []
             for sem_val, group in df.groupby('semester'):
+                # Nota máxima por estudiante en ESTE semestre
+                max_sem = group.groupby('student_id')['final_grade'].max().reset_index()
+                f_ids = max_sem[max_sem['final_grade'] == 0.0]['student_id']
+                
+                f_df = group[group['student_id'].isin(f_ids)]
+                
                 total_sem = group['student_id'].nunique()
-                max_sem = group.groupby('student_id')['final_grade'].max()
-                fantasmas_sem = int((max_sem == 0).sum())
-                porcentaje_sem = round((fantasmas_sem / total_sem) * 100, 1) if total_sem > 0 else 0.0
+                fantasmas_sem = f_df['student_id'].nunique()
                 
                 evolucion.append({
                     "semestre": str(sem_val),
-                    "estudiantes_fantasma": fantasmas_sem,
+                    "estudiantes_fantasma": int(fantasmas_sem),
                     "total_estudiantes": int(total_sem),
-                    "porcentaje": porcentaje_sem
+                    "porcentaje": round((fantasmas_sem / total_sem) * 100, 1) if total_sem > 0 else 0.0
                 })
             return sorted(evolucion, key=lambda x: x['semestre'], reverse=True)
 
@@ -250,6 +357,7 @@ def get_kpi_fantasmas(semestre: str = None):
         )
 
 @app.get("/api/heatmap")
+@cache_response(expire=3600)
 def get_heatmap(semestre: str = "2025-2"):
     try:
         data = supabase_fetch_all('academic_performance', 'student_id, final_grade, class_groups!inner(semester, group_schedules(start_time, day_of_week))', {'class_groups.semester': semestre})
@@ -284,104 +392,44 @@ def get_heatmap(semestre: str = "2025-2"):
         return JSONResponse(status_code=400, content={"error": str(e)})
 
 @app.get("/api/teachers")
+@cache_response(expire=3600)
 def get_teachers(semestre: str = "2025-2", materia: str = None):
     try:
-        sel = 'student_id, final_grade, class_groups!inner(semester, subjects(name), teachers(full_name))'
-        filters = {'class_groups.semester': semestre}
-        if materia:
-            filters['class_groups.subjects.name'] = materia
-        data = supabase_fetch_all('academic_performance', sel, filters)
-        if not data: return []
-        df = pd.DataFrame(data)
-        # Navegación segura con `or {}` para evitar NoneType.get()
-        def extract_teacher(x):
-            cg = x if isinstance(x, dict) else {}
-            teacher = cg.get('teachers') or {}
-            return teacher.get('full_name')  # None si no tiene docente asignado
-        df['teacher_name'] = df['class_groups'].apply(extract_teacher)
-        
-        # 1. Normalizar notas (por si vienen con coma colombiana) y quitar nulos
-        df['final_grade'] = df['final_grade'].astype(str).str.replace(',', '.')
-        df['final_grade'] = pd.to_numeric(df['final_grade'], errors='coerce')
-        df = df.dropna(subset=['final_grade', 'teacher_name'])
-
-        # 2. Agrupar manteniendo a todos los estudiantes (aprobados y reprobados)
-        stats = df.groupby('teacher_name').agg(
-            total_estudiantes=('student_id', 'nunique'),
-            reprobados=('final_grade', lambda x: (x < 3.0).sum())
-        ).reset_index()
-
-        # 3. Calcular la tasa pura (SIN multiplicar por 100)
-        stats['tasa_mortalidad'] = (stats['reprobados'] / stats['total_estudiantes']).round(4).fillna(0)
-
-        stats = stats[stats['total_estudiantes'] >= 40].sort_values('tasa_mortalidad', ascending=False).head(15)
-        
-        # 4. Retornar con las llaves originales que consume main.js
-        return clean_df_for_json(stats)
+        supabase = get_supabase_client()
+        query = supabase.table('view_top_docentes').select('*')
+        if semestre:
+            query = query.eq('semester', semestre)
+        res = query.execute()
+        return res.data
     except Exception as e:
-        print(f"Error teachers: {e}")
-        return JSONResponse(status_code=400, content={"error": str(e)})
+        print(f"Error teachers view: {e}")
+        return []
 
 
 @app.get("/api/adaptacion")
+@cache_response(expire=3600)
 def get_adaptacion(semestre: str = "2025-2"):
     try:
-        sb = get_supabase_client()
-        # Clave primaria es 'id', no 'student_id'
-        data = supabase_fetch_all('students', 'id, antiguedad')
-        data_perf = sb.table('academic_performance').select('student_id, final_grade, class_groups!inner(semester)').eq('class_groups.semester', semestre).limit(100000).execute().data or []
-        if not data_perf: return []
-        df_p = pd.DataFrame(data_perf)
-        df_p['final_grade'] = pd.to_numeric(df_p['final_grade'], errors='coerce').fillna(0)
-        df_p['mortalidad'] = (df_p['final_grade'] < 3.0).astype(int)
-        # Renombrar 'id' → 'student_id' para poder hacer el merge
-        df_s = pd.DataFrame(data).rename(columns={'id': 'student_id'})[['student_id', 'antiguedad']]
-        df = df_p.merge(df_s, on='student_id', how='left')
-        if 'antiguedad' not in df.columns: return []
-        result = df.groupby('antiguedad')['mortalidad'].mean().reset_index()
-        result['mortalidad'] = result['mortalidad'].round(4)
-        result = result.rename(columns={'antiguedad': 'semestre'})
-        return clean_df_for_json(result)
+        supabase = get_supabase_client()
+        res = supabase.table('view_kpi_adaptacion').select('*').execute()
+        return res.data
     except Exception as e:
-        print(f"Error adaptacion: {e}")
-        return JSONResponse(status_code=400, content={"error": str(e)})
-
+        print(f"Error adaptacion view: {e}")
+        return []
 
 @app.get("/api/brecha-ciencias")
+@cache_response(expire=3600)
 def get_brecha_ciencias(semestre: str = "2025-2"):
     try:
-        data = supabase_fetch_all('academic_performance', 'student_id, final_grade, class_groups!inner(semester, subjects(name))', {'class_groups.semester': semestre})
-        if not data: return []
-        df = pd.DataFrame(data)
-        df['subject_name'] = df['class_groups'].apply(lambda x: x.get('subjects', {}).get('name','') if isinstance(x,dict) else '')
-        df = df[df['subject_name'].str.contains('CÁLCULO|FISICA|ALGEBRA|PROGRAMACIÓN|CALCULO', case=False, na=False)]
-        if df.empty: return []
-        
-        data_s = supabase_fetch_all('students', 'id, gender')
-        df_gen = pd.DataFrame(data_s).rename(columns={'id':'student_id'})
-        df = df.merge(df_gen, on='student_id', how='inner')
-        
-        # 1. Normalizar notas (por si vienen con coma colombiana) y quitar nulos
-        df['final_grade'] = df['final_grade'].astype(str).str.replace(',', '.')
-        df['final_grade'] = pd.to_numeric(df['final_grade'], errors='coerce')
-        df = df.dropna(subset=['final_grade'])
-
-        # 2. Agrupar manteniendo a todos los estudiantes (aprobados y reprobados)
-        stats = df.groupby('gender').agg(
-            total_estudiantes=('student_id', 'nunique'),
-            reprobados=('final_grade', lambda x: (x < 3.0).sum())
-        ).reset_index()
-
-        # 3. Calcular la tasa pura (SIN multiplicar por 100)
-        stats['tasa_mortalidad'] = (stats['reprobados'] / stats['total_estudiantes']).round(4).fillna(0)
-
-        # 4. Retornar con las llaves originales que consume main.js (sexo, tasa_mortalidad)
-        return clean_df_for_json(stats.rename(columns={'gender': 'sexo'}))
+        supabase = get_supabase_client()
+        res = supabase.table('view_kpi_genero').select('*').execute()
+        return res.data
     except Exception as e:
-        print(f"Error brecha: {e}")
-        return JSONResponse(status_code=400, content={"error": str(e)})
+        print(f"Error brecha view: {e}")
+        return []
 
 @app.get("/api/materias-filtro")
+@cache_response(expire=3600)
 def get_materias_filtro(semestre: str = "2025-2"):
     try:
         data = supabase_fetch_all('academic_performance', 'student_id, final_grade, class_groups!inner(semester, subjects(name))', {'class_groups.semester': semestre})
@@ -390,34 +438,26 @@ def get_materias_filtro(semestre: str = "2025-2"):
         df['subject_name'] = df['class_groups'].apply(lambda x: x.get('subjects',{}).get('name','') if isinstance(x,dict) else '')
         df = df[~df['subject_name'].str.contains('NIVELATORIO|GRADO|PRACTICA', case=False, na=False)]
         
-        # 1. Normalizar notas (por si vienen con coma colombiana) y quitar nulos
-        df['final_grade'] = df['final_grade'].astype(str).str.replace(',', '.')
-        df['final_grade'] = pd.to_numeric(df['final_grade'], errors='coerce')
-        df = df.dropna(subset=['final_grade'])
-
-        # 2. Agrupar manteniendo a todos los estudiantes (aprobados y reprobados)
-        stats = df.groupby('subject_name').agg(
-            total_estudiantes=('student_id', 'nunique'),
-            reprobados=('final_grade', lambda x: (x < 3.0).sum())
-        ).reset_index()
-
-        # 3. Calcular la tasa pura (SIN multiplicar por 100)
-        stats['tasa_mortalidad'] = (stats['reprobados'] / stats['total_estudiantes']).round(4).fillna(0)
-
-        stats = stats[stats['total_estudiantes']>=30].sort_values('tasa_mortalidad', ascending=False).head(10)
+        stats = calcular_mortalidad_sql(df, 'subject_name')
+        stats = stats[stats['total_evaluaciones'] >= 30].sort_values('value', ascending=False).head(10)
         
-        # 4. Retornar con las llaves originales que consume main.js (asignatura, tasa_mortalidad)
-        return clean_df_for_json(stats.rename(columns={'subject_name': 'asignatura'}))
+        return clean_df_for_json(stats[['name', 'value', 'total_evaluaciones', 'total_estudiantes_unicos', 'reprobados']])
     except Exception as e:
         print(f"Error materias-filtro: {e}")
         return JSONResponse(status_code=400, content={"error": str(e)})
 
 @app.get("/api/sedes")
+@cache_response(expire=3600)
 def get_sedes(semestre: str = "2025-2"):
     try:
-        data = supabase_fetch_all('academic_performance', 'student_id, final_grade, class_groups(semester)', {'class_groups.semester': semestre})
+        data = supabase_fetch_all('academic_performance', 'student_id, final_grade, class_groups(semester, subjects(name))', {'class_groups.semester': semestre})
         if not data: return []
         df = pd.DataFrame(data)
+        
+        # Extraer el nombre de la materia y filtrar nivelatorios
+        df['materia_nombre'] = df['class_groups'].apply(lambda x: x.get('subjects', {}).get('name', '') if isinstance(x, dict) else '')
+        df = df[~df['materia_nombre'].str.lower().str.contains('nivelatorio', na=False)]
+        
         data_s = supabase_fetch_all('students', 'id, campus_id')
         data_c = supabase_fetch_all('campuses', 'id, name')
         df_s = pd.DataFrame(data_s).rename(columns={'id':'student_id'})
@@ -425,68 +465,27 @@ def get_sedes(semestre: str = "2025-2"):
         df_s = df_s.merge(df_c, on='campus_id', how='left')
         df = df.merge(df_s, on='student_id', how='inner')
         
-        # 1. Normalizar notas (por si vienen con coma colombiana) y quitar nulos
-        df['final_grade'] = df['final_grade'].astype(str).str.replace(',', '.')
-        df['final_grade'] = pd.to_numeric(df['final_grade'], errors='coerce')
-        df = df.dropna(subset=['final_grade'])
-
-        # 2. Agrupar manteniendo a todos los estudiantes (aprobados y reprobados)
-        stats = df.groupby('sede').agg(
-            total_estudiantes=('student_id', 'nunique'),
-            reprobados=('final_grade', lambda x: (x < 3.0).sum())
-        ).reset_index()
-
-        # 3. Calcular la tasa pura (SIN multiplicar por 100)
-        stats['tasa_mortalidad'] = (stats['reprobados'] / stats['total_estudiantes']).round(4).fillna(0)
-
-        stats = stats[stats['total_estudiantes']>=10].sort_values('tasa_mortalidad', ascending=False)
+        stats = calcular_mortalidad_sql(df, 'sede')
+        stats = stats[stats['total_evaluaciones'] >= 10].sort_values('value', ascending=False)
         
-        # 4. Retornar con las llaves originales que consume main.js (sede, tasa_mortalidad)
-        return clean_df_for_json(stats[['sede', 'total_estudiantes', 'reprobados', 'tasa_mortalidad']])
+        return clean_df_for_json(stats[['name', 'value', 'total_evaluaciones', 'total_estudiantes_unicos', 'reprobados']])
     except Exception as e:
         print(f"Error sedes: {e}")
         return JSONResponse(status_code=400, content={"error": str(e)})
 
 @app.get("/api/jornada")
+@cache_response(expire=3600)
 def get_jornada(semestre: str = "2025-2"):
     try:
-        data = supabase_fetch_all('academic_performance', 'student_id, final_grade, class_groups!inner(semester, group_schedules(start_time))', {'class_groups.semester': semestre})
-        if not data: return []
-        df = pd.DataFrame(data)
-        def get_hora(row):
-            cg = row.get('class_groups', {})
-            scheds = cg.get('group_schedules', []) if isinstance(cg, dict) else []
-            if scheds:
-                t = pd.to_datetime(scheds[0].get('start_time',''), format='%H:%M:%S', errors='coerce')
-                if pd.notnull(t):
-                    h = t.hour
-                    return h + 12 if h <= 5 else h
-            return None
-        df['hora'] = df.apply(get_hora, axis=1)
-        
-        # 1. Normalizar notas (por si vienen con coma colombiana) y quitar nulos
-        df['final_grade'] = df['final_grade'].astype(str).str.replace(',', '.')
-        df['final_grade'] = pd.to_numeric(df['final_grade'], errors='coerce')
-        df = df.dropna(subset=['hora', 'final_grade'])
-        
-        df['jornada'] = df['hora'].apply(lambda x: 'Nocturna (18:00 - 22:00)' if x >= 18 else 'Diurna (06:00 - 17:59)')
-        
-        # 2. Agrupar manteniendo a todos los estudiantes (aprobados y reprobados)
-        stats = df.groupby('jornada').agg(
-            total_estudiantes=('student_id', 'nunique'),
-            reprobados=('final_grade', lambda x: (x < 3.0).sum())
-        ).reset_index()
-
-        # 3. Calcular la tasa pura (SIN multiplicar por 100)
-        stats['tasa_mortalidad'] = (stats['reprobados'] / stats['total_estudiantes']).round(4).fillna(0)
-        
-        # 4. Retornar con las llaves originales que consume main.js (jornada, tasa_mortalidad)
-        return clean_df_for_json(stats)
+        supabase = get_supabase_client()
+        res = supabase.table('view_kpi_jornada').select('*').execute()
+        return res.data
     except Exception as e:
-        print(f"Error jornada: {e}")
-        return JSONResponse(status_code=400, content={"error": str(e)})
+        print(f"Error jornada view: {e}")
+        return []
 
 @app.get("/api/rutas-transporte")
+@cache_response(expire=3600)
 def get_rutas_transporte(semestre: str = "2025-2"):
     try:
         sb = get_supabase_client()
@@ -546,6 +545,7 @@ def get_rutas_transporte(semestre: str = "2025-2"):
 
 
 @app.get("/api/mapa-poligonos")
+@cache_response(expire=3600)
 def get_mapa_poligonos(semestre: str = "2025-2", metrica: str = 'poblacion', nivel_geo: str = 'barrio'):
     try:
         sb = get_supabase_client()
@@ -574,11 +574,14 @@ def get_mapa_poligonos(semestre: str = "2025-2", metrica: str = 'poblacion', niv
         # 4. JOIN: unir notas con barrio/comuna del estudiante
         df = df_p.merge(df_s, on='student_id', how='left')
         
-        # Aplicar unificación geográfica
+        # Aplicar unificación geográfica base
         df['ubicacion_final'] = df.apply(unificar_ubicacion, axis=1)
         
-        df[col_geo] = df['ubicacion_final'].str.upper().str.strip()
-        df.loc[df[col_geo].isin(['NAN','NONE','','** DESCONOCIDA **', 'DESCONOCIDO']), col_geo] = 'DESCONOCIDO'
+        # --- SMART GEO-MATCHING (Alinear con GeoJSON) ---
+        df[col_geo] = df['ubicacion_final'].apply(lambda x: emparejar_con_geojson(x, tipo=nivel_geo))
+        
+        # Filtrar desconocidos para el reporte final del mapa
+        df = df[df[col_geo] != 'Desconocido']
         
         totales = df.groupby(col_geo)['student_id'].nunique().reset_index(name='total_estudiantes')
         
