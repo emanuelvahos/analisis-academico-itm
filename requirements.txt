@@ -1,18 +1,13 @@
 fastapi
-uvicorn
+uvicorn[standard]
 pandas
-openpyxl
 supabase
-python-dotenv
-psycopg2-binary
-matplotlib
-seaborn
-scipy
-statsmodels
 fastapi-cache2
+jinja2
+itsdangerous
 #python scripts/analisis_hipotesis_horarios.py
 #python scripts/etl_pipeline.py
 #.\venv\Scripts\activate
 #python scripts/analisis_sociodemografico.py
 #pip install -r requirements.txt
-#uvicorn api:app --reload
+#uvicorn api:app --host 0.0.0.0 --port 8000

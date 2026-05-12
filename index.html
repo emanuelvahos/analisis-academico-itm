@@ -180,6 +180,29 @@
           </div>
         </div>
 
+        <!-- ============ WORKSPACE COMPARATIVA ============ -->
+        <div id="workspace-comparativa" class="hidden" style="margin-bottom: 24px; padding: 20px; background: #ffffff; border-radius: 12px; border: 1px solid #e2e8f0; box-shadow: 0 1px 3px rgba(0,0,0,0.05);">
+          <div style="display: flex; gap: 16px; align-items: flex-end; margin-bottom: 20px;">
+            <div style="display: flex; flex-direction: column; flex-grow: 1; max-width: 300px;">
+              <label for="select-metrica" style="font-size: 13px; font-weight: 600; color: #64748b; margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.5px;">Métrica a Comparar</label>
+              <select id="select-metrica" style="padding: 10px 14px; border: 1px solid #cbd5e1; border-radius: 8px; font-size: 14px; color: #0f172a; outline: none; transition: border-color 0.2s;">
+                <option value="Sedes">Sedes</option>
+                <option value="Jornada">Jornada</option>
+                <option value="Materias Filtro">Materias Filtro</option>
+                <option value="Top Docentes">Top Docentes</option>
+              </select>
+            </div>
+            <button id="btn-agregar-comparativa" style="padding: 10px 20px; background: #0f172a; color: white; border: none; border-radius: 8px; font-size: 14px; font-weight: 600; cursor: pointer; transition: background 0.2s;">
+              + Agregar al Tablero
+            </button>
+          </div>
+
+          <!-- Contenedor donde se insertarán las gráficas duplicadas -->
+          <div id="contenedor-graficas-comparativa" class="grid-2">
+            <!-- Gráficas irán aquí -->
+          </div>
+        </div>
+
         <!-- ============ KPIs ============ -->
         <div class="kpi-row">
 

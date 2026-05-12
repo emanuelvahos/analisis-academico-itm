@@ -1,7 +1,68 @@
 // 1. Variables Globales de Estado y Gráficas
 let heatmapChart, teachersChart, adaptacionChart, brechaChart, materiasChart, sedesChart, jornadaChart, mapaChart, chartMapaCalor, municipiosChart;
+
 let currentSemestre = '2025-2';
+let isComparing = false;
 let currentMetrica = 'poblacion';
+
+// --- HELPERS PARA COMPARACIÓN ---
+async function fetchChartData(endpoint, materiaFilter = '') {
+    let url2025_1 = `${API_BASE}/${endpoint}?semestre=2025-1`;
+    let url2025_2 = `${API_BASE}/${endpoint}?semestre=2025-2`;
+    let urlSingle = `${API_BASE}/${endpoint}?semestre=${currentSemestre}`;
+    
+    if (materiaFilter) {
+        const query = `&materia=${encodeURIComponent(materiaFilter)}`;
+        url2025_1 += query;
+        url2025_2 += query;
+        urlSingle += query;
+    }
+    
+    if (isComparing) {
+        const [res1, res2] = await Promise.all([fetch(url2025_1), fetch(url2025_2)]);
+        return { isComparing: true, data1: await res1.json(), data2: await res2.json() };
+    } else {
+        const res = await fetch(urlSingle);
+        return { isComparing: false, data1: await res.json(), data2: [] };
+    }
+}
+
+function processChartData(fetchResult, reverse = false) {
+    let raw1 = fetchResult.data1 || [];
+    let raw2 = fetchResult.data2 || [];
+    
+    // Sort logic handles Adaptación specific case if needed, but we rely on backend sorting mostly.
+    const allKeys = new Set();
+    raw1.forEach(item => allKeys.add(item.name));
+    if (fetchResult.isComparing) {
+        raw2.forEach(item => allKeys.add(item.name));
+    }
+    
+    let categories = Array.from(allKeys);
+    if (reverse) categories.reverse();
+    
+    const map1 = new Map(raw1.map(item => [item.name, item]));
+    const map2 = new Map(raw2.map(item => [item.name, item]));
+    
+    const data1 = categories.map(cat => map1.get(cat) || { name: cat, value: 0, total_evaluaciones: 0, total_estudiantes_unicos: 0, reprobados: 0 });
+    const data2 = categories.map(cat => map2.get(cat) || { name: cat, value: 0, total_evaluaciones: 0, total_estudiantes_unicos: 0, reprobados: 0 });
+    
+    return { categories, data1, data2 };
+}
+
+function getSeriesConfig(processedData) {
+    if (isComparing) {
+        return [
+            { name: '2025-1', type: 'bar', data: processedData.data1, itemStyle: {color: '#3b82f6'} },
+            { name: '2025-2', type: 'bar', data: processedData.data2, itemStyle: {color: '#f97316'} }
+        ];
+    } else {
+        return [
+            { name: currentSemestre, type: 'bar', data: processedData.data1, itemStyle: {color: '#3b82f6'} }
+        ];
+    }
+}
+
 let currentNivelGeo = 'barrio'; // Nivel inicial: Barrios
 let geojsonLoaded = false;
 
@@ -9,23 +70,33 @@ const API_BASE = '/api';
 const days = ['Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado'];
 const hours = ['06:00-08:00', '08:00-10:00', '10:00-12:00', '12:00-14:00', '14:00-16:00', '16:00-18:00', '18:00-20:00', '20:00-22:00'];
 
-// 2. Función Centralizada de Actualización
+// 2. Función Centralizada de Actualización (con Debounce)
+let debounceTimer;
 function actualizarDashboard() {
-    console.log("Actualizando dashboard para el semestre:", currentSemestre);
-    loadData(currentSemestre);
-    renderMapaCalor();
+    clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(() => {
+        console.log("Actualizando dashboard para el semestre:", currentSemestre);
+        loadData(currentSemestre);
+        renderMapaCalor();
+    }, 250); // Evita ráfagas de fetch()
 }
 
 // 3. Función de Carga de Datos (Core)
+let isFetching = false;
 async function loadData(semestre) {
+    if (isFetching) {
+        console.warn("Se ignoró una petición porque ya hay una carga masiva en progreso.");
+        return;
+    }
+    
+    isFetching = true;
     console.log("--- Iniciando carga de datos defensiva ---");
-    // Mostrar estado de carga visual en los charts
     [heatmapChart, teachersChart, adaptacionChart, brechaChart, materiasChart, sedesChart, jornadaChart, mapaChart].forEach(c => c && c.showLoading());
 
     // A. Fetch KPIs
     try {
         console.log("Cargando sección: KPIs...");
-        const kpiRes = await fetch(`${API_BASE}/kpis?semestre=${semestre}`);
+        const kpiRes = await fetch(`${API_BASE}/kpis?semestre=${isComparing ? '2025-2' : semestre}`);
         const kpiData = await kpiRes.json();
 
         if (document.getElementById('kpi-mortalidad')) document.getElementById('kpi-mortalidad').innerText = kpiData.mortalidad_global;
@@ -41,7 +112,6 @@ async function loadData(semestre) {
 
         if (document.getElementById('kpi-asignatura-nombre')) document.getElementById('kpi-asignatura-nombre').innerText = kpiData.asignatura_critica.nombre;
         if (document.getElementById('kpi-asignatura-pct')) document.getElementById('kpi-asignatura-pct').innerText = kpiData.asignatura_critica.porcentaje + '% de reprobación';
-        if (document.getElementById('titulo-periodo')) document.getElementById('titulo-periodo').innerText = `Resumen General · Periodo ${semestre}`;
     } catch (error) {
         console.error("Fallo crítico en sección KPIs:", error);
     }
@@ -49,7 +119,7 @@ async function loadData(semestre) {
     // B. Fetch Heatmap
     try {
         console.log("Cargando sección: Heatmap...");
-        const heatmapRes = await fetch(`${API_BASE}/heatmap?semestre=${semestre}`);
+        const heatmapRes = await fetch(`${API_BASE}/heatmap?semestre=${isComparing ? '2025-2' : semestre}`);
         const heatmapRaw = await heatmapRes.json();
         const heatmapFormatted = heatmapRaw.map(item => {
             const x = days.indexOf(item.dia_nombre);
@@ -61,31 +131,37 @@ async function loadData(semestre) {
         console.error("Fallo en sección Heatmap:", error);
     }
 
+    // Custom formatter for tooltip
+    const commonTooltipFormatter = function (params) {
+        // Handle array of params for grouped bars (axis trigger) or single param (item trigger)
+        const paramList = Array.isArray(params) ? params : [params];
+        let tooltipHtml = `<b>${paramList[0].name}</b><br/>`;
+        
+        paramList.forEach(p => {
+            const d = p.data || {};
+            tooltipHtml += `<div style="margin-top: 5px;">
+                <span style="display:inline-block;margin-right:4px;border-radius:10px;width:10px;height:10px;background-color:${p.color};"></span>
+                <b>${p.seriesName}</b><br/>
+                Evaluaciones: ${d.total_evaluaciones || 0}<br/>
+                Estudiantes: ${d.total_estudiantes_unicos || 0}<br/>
+                Mortalidad: ${((d.value || 0) * 100).toFixed(1)}%
+            </div>`;
+        });
+        return tooltipHtml;
+    };
+
     // C. Fetch Docentes
     try {
         console.log("Cargando sección: Docentes...");
         const materiaFilter = document.getElementById('materia-docente-filter')?.value || '';
-        let teachersUrl = `${API_BASE}/teachers?semestre=${semestre}`;
-        if (materiaFilter) teachersUrl += `&materia=${encodeURIComponent(materiaFilter)}`;
-        const teachersRes = await fetch(teachersUrl);
-        const teachersRaw = await teachersRes.json();
-
-        const teachersData = [...teachersRaw].reverse();
+        const fetchRes = await fetchChartData('teachers', materiaFilter);
+        const processed = processChartData(fetchRes, true); // Reverse for horizontal
 
         teachersChart.setOption({
-            yAxis: { data: teachersData.map(t => t.name) },
-            series: [{ data: teachersData.map(t => ({ name: t.name, value: t.value, total_evaluaciones: t.total_evaluaciones, total_estudiantes_unicos: t.total_estudiantes_unicos, reprobados: t.reprobados })) }],
-            tooltip: {
-                trigger: 'item',
-                formatter: function (params) {
-                    const d = params.data || params;
-                    return `<b>${d.name}</b><br/>` +
-                        `Evaluaciones Totales: ${d.total_evaluaciones || 0}<br/>` +
-                        `Estudiantes Únicos: ${d.total_estudiantes_unicos || 0}<br/>` +
-                        `Mortalidad: ${((d.value || 0) * 100).toFixed(1)}%`;
-                }
-            }
-        });
+            yAxis: { data: processed.categories },
+            series: getSeriesConfig(processed),
+            tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' }, formatter: commonTooltipFormatter }
+        }, { replaceMerge: ['series', 'yAxis'] });
     } catch (error) {
         console.error("Fallo en sección Docentes:", error);
     }
@@ -93,25 +169,30 @@ async function loadData(semestre) {
     // D. Fetch Adaptacion
     try {
         console.log("Cargando sección: Adaptación...");
-        const adaptacionRes = await fetch(`${API_BASE}/adaptacion?semestre=${semestre}`);
-        let adaptacionRaw = await adaptacionRes.json();
-        if (!adaptacionRaw || adaptacionRaw.length === 0) {
-            adaptacionRaw = Array.from({ length: 10 }, (_, i) => ({ semestre: i + 1, mortalidad: 0.45 - (i * 0.03) }));
+        const fetchRes = await fetchChartData('adaptacion');
+        
+        // Ensure 1 to 10 fallback if empty
+        if (!fetchRes.data1 || fetchRes.data1.length === 0) {
+            fetchRes.data1 = Array.from({ length: 10 }, (_, i) => ({ name: `Semestre ${i + 1}`, value: 0.45 - (i * 0.03), total_evaluaciones: 0, total_estudiantes_unicos: 0, reprobados: 0 }));
         }
+        if (fetchRes.isComparing && (!fetchRes.data2 || fetchRes.data2.length === 0)) {
+            fetchRes.data2 = Array.from({ length: 10 }, (_, i) => ({ name: `Semestre ${i + 1}`, value: 0.40 - (i * 0.02), total_evaluaciones: 0, total_estudiantes_unicos: 0, reprobados: 0 }));
+        }
+
+        const processed = processChartData(fetchRes, false);
+        // Sort by semestre number
+        const sortOrder = Array.from({length: 15}, (_, i) => String(i+1));
+        const sortIndices = processed.categories.map((c, i) => i).sort((a, b) => sortOrder.indexOf(processed.categories[a]) - sortOrder.indexOf(processed.categories[b]));
+        
+        processed.categories = sortIndices.map(i => processed.categories[i]);
+        processed.data1 = sortIndices.map(i => processed.data1[i]);
+        processed.data2 = sortIndices.map(i => processed.data2[i]);
+
         adaptacionChart.setOption({
-            xAxis: { type: 'category', data: adaptacionRaw.map(item => item.name) },
-            series: [{ data: adaptacionRaw.map(item => ({ name: item.name, value: item.value, total_evaluaciones: item.total_evaluaciones, total_estudiantes_unicos: item.total_estudiantes_unicos, reprobados: item.reprobados })) }],
-            tooltip: {
-                trigger: 'item',
-                formatter: function (params) {
-                    const d = params.data || params;
-                    return `<b>${d.name}</b><br/>` +
-                        `Evaluaciones Totales: ${d.total_evaluaciones || 0}<br/>` +
-                        `Estudiantes Únicos: ${d.total_estudiantes_unicos || 0}<br/>` +
-                        `Mortalidad: ${((d.value || 0) * 100).toFixed(1)}%`;
-                }
-            }
-        });
+            xAxis: { type: 'category', data: processed.categories },
+            series: getSeriesConfig(processed),
+            tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' }, formatter: commonTooltipFormatter }
+        }, { replaceMerge: ['series', 'xAxis'] });
     } catch (error) {
         console.error("Fallo en sección Adaptación:", error);
     }
@@ -119,22 +200,14 @@ async function loadData(semestre) {
     // E. Fetch Brecha de Género
     try {
         console.log("Cargando sección: Brecha de Género...");
-        const brechaRes = await fetch(`${API_BASE}/brecha-ciencias?semestre=${semestre}`);
-        const brechaRaw = await brechaRes.json();
+        const fetchRes = await fetchChartData('brecha-ciencias');
+        const processed = processChartData(fetchRes, false);
+
         brechaChart.setOption({
-            xAxis: { data: brechaRaw.map(item => item.name) },
-            series: [{ data: brechaRaw.map(item => ({ name: item.name, value: item.value, total_evaluaciones: item.total_evaluaciones, total_estudiantes_unicos: item.total_estudiantes_unicos, reprobados: item.reprobados })) }],
-            tooltip: {
-                trigger: 'item',
-                formatter: function (params) {
-                    const d = params.data || params;
-                    return `<b>${d.name}</b><br/>` +
-                        `Evaluaciones Totales: ${d.total_evaluaciones || 0}<br/>` +
-                        `Estudiantes Únicos: ${d.total_estudiantes_unicos || 0}<br/>` +
-                        `Mortalidad: ${((d.value || 0) * 100).toFixed(1)}%`;
-                }
-            }
-        });
+            xAxis: { data: processed.categories },
+            series: getSeriesConfig(processed),
+            tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' }, formatter: commonTooltipFormatter }
+        }, { replaceMerge: ['series', 'xAxis'] });
     } catch (error) {
         console.error("Fallo en sección Brecha:", error);
     }
@@ -142,23 +215,14 @@ async function loadData(semestre) {
     // F. Fetch Materias Filtro
     try {
         console.log("Cargando sección: Materias Filtro...");
-        const materiasRes = await fetch(`${API_BASE}/materias-filtro?semestre=${semestre}`);
-        const materiasRaw = await materiasRes.json();
-        const materiasData = [...materiasRaw].reverse();
+        const fetchRes = await fetchChartData('materias-filtro');
+        const processed = processChartData(fetchRes, true); // Reverse for horizontal
+
         materiasChart.setOption({
-            yAxis: { data: materiasData.map(m => m.name) },
-            series: [{ data: materiasData.map(m => ({ name: m.name, value: m.value, total_evaluaciones: m.total_evaluaciones, total_estudiantes_unicos: m.total_estudiantes_unicos, reprobados: m.reprobados })) }],
-            tooltip: {
-                trigger: 'item',
-                formatter: function (params) {
-                    const d = params.data || params;
-                    return `<b>${d.name}</b><br/>` +
-                        `Evaluaciones Totales: ${d.total_evaluaciones || 0}<br/>` +
-                        `Estudiantes Únicos: ${d.total_estudiantes_unicos || 0}<br/>` +
-                        `Mortalidad: ${((d.value || 0) * 100).toFixed(1)}%`;
-                }
-            }
-        });
+            yAxis: { data: processed.categories },
+            series: getSeriesConfig(processed),
+            tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' }, formatter: commonTooltipFormatter }
+        }, { replaceMerge: ['series', 'yAxis'] });
     } catch (error) {
         console.error("Fallo en sección Materias:", error);
     }
@@ -166,22 +230,14 @@ async function loadData(semestre) {
     // G. Fetch Sedes
     try {
         console.log("Cargando sección: Sedes...");
-        const sedesRes = await fetch(`${API_BASE}/sedes?semestre=${semestre}`);
-        const sedesRaw = await sedesRes.json();
+        const fetchRes = await fetchChartData('sedes');
+        const processed = processChartData(fetchRes, false);
+
         sedesChart.setOption({
-            xAxis: { data: sedesRaw.map(s => s.name) },
-            series: [{ data: sedesRaw.map(s => ({ name: s.name, value: s.value, total_evaluaciones: s.total_evaluaciones, total_estudiantes_unicos: s.total_estudiantes_unicos, reprobados: s.reprobados })) }],
-            tooltip: {
-                trigger: 'item',
-                formatter: function (params) {
-                    const d = params.data || params;
-                    return `<b>${d.name}</b><br/>` +
-                        `Evaluaciones Totales: ${d.total_evaluaciones || 0}<br/>` +
-                        `Estudiantes Únicos: ${d.total_estudiantes_unicos || 0}<br/>` +
-                        `Mortalidad: ${((d.value || 0) * 100).toFixed(1)}%`;
-                }
-            }
-        });
+            xAxis: { data: processed.categories },
+            series: getSeriesConfig(processed),
+            tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' }, formatter: commonTooltipFormatter }
+        }, { replaceMerge: ['series', 'xAxis'] });
     } catch (error) {
         console.error("Fallo en sección Sedes:", error);
     }
@@ -189,28 +245,24 @@ async function loadData(semestre) {
     // H. Fetch Jornada
     try {
         console.log("Cargando sección: Jornada...");
-        const jornadaRes = await fetch(`${API_BASE}/jornada?semestre=${semestre}`);
-        const jornadaRaw = await jornadaRes.json();
+        const fetchRes = await fetchChartData('jornada');
+        const processed = processChartData(fetchRes, false);
 
-        const totalEvaluaciones = jornadaRaw.reduce((sum, j) => sum + (j.total_evaluaciones || 0), 0);
+        // Update Total Evaluaciones KPI
+        let totalEvaluaciones = processed.data1.reduce((sum, j) => sum + (j.total_evaluaciones || 0), 0);
+        if (fetchRes.isComparing) {
+            totalEvaluaciones += processed.data2.reduce((sum, j) => sum + (j.total_evaluaciones || 0), 0);
+        }
         const contadorRegistros = document.getElementById('contador-registros');
         if (contadorRegistros) {
             contadorRegistros.innerText = totalEvaluaciones.toLocaleString('es-CO');
         }
 
         jornadaChart.setOption({
-            series: [{ data: jornadaRaw.map(j => ({ name: j.name, value: j.value, total_evaluaciones: j.total_evaluaciones, total_estudiantes_unicos: j.total_estudiantes_unicos, reprobados: j.reprobados })) }],
-            tooltip: {
-                trigger: 'item',
-                formatter: function (params) {
-                    const d = params.data || params;
-                    return `<b>${d.name}</b><br/>` +
-                        `Evaluaciones Totales: ${d.total_evaluaciones || 0}<br/>` +
-                        `Estudiantes Únicos: ${d.total_estudiantes_unicos || 0}<br/>` +
-                        `Mortalidad: ${((d.value || 0) * 100).toFixed(1)}%`;
-                }
-            }
-        });
+            xAxis: { data: processed.categories },
+            series: getSeriesConfig(processed),
+            tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' }, formatter: commonTooltipFormatter }
+        }, { replaceMerge: ['series', 'xAxis'] });
     } catch (error) {
         console.error("Fallo en sección Jornada:", error);
     }
@@ -218,7 +270,7 @@ async function loadData(semestre) {
     // I. Fetch Rutas Transporte (Mapa)
     try {
         console.log("Cargando sección: Mapa de Rutas...");
-        const mapaRes = await fetch(`${API_BASE}/rutas-transporte?semestre=${semestre}`);
+        const mapaRes = await fetch(`${API_BASE}/rutas-transporte?semestre=${isComparing ? '2025-2' : semestre}`);
         const mapaRaw = await mapaRes.json();
 
         const nodosMap = new Map();
@@ -257,7 +309,7 @@ async function loadData(semestre) {
     // J. Fetch KPI Fantasmas
     try {
         console.log("Cargando sección: KPI Fantasmas...");
-        cargarKPIFantasmas(semestre);
+        cargarKPIFantasmas(isComparing ? '2025-2' : semestre);
     } catch (error) {
         console.error("Fallo en sección KPI Fantasmas:", error);
     }
@@ -265,9 +317,11 @@ async function loadData(semestre) {
     // Quitar estado de carga
     [heatmapChart, teachersChart, adaptacionChart, brechaChart, materiasChart, sedesChart, jornadaChart, mapaChart].forEach(c => c && c.hideLoading());
     console.log("--- Carga de datos finalizada ---");
+    isFetching = false;
 }
 
 // Función dedicada para el Mapa de Calor (GeoJSON)
+
 function renderMapaCalor() {
     const chartMapaCalor = echarts.getInstanceByDom(document.getElementById('chart-mapa-calor')) || echarts.init(document.getElementById('chart-mapa-calor'));
 
@@ -601,16 +655,34 @@ document.addEventListener('DOMContentLoaded', () => {
             botonesSemestre.forEach(b => b.classList.remove('active'));
             const botonClickeado = e.currentTarget;
             botonClickeado.classList.add('active');
-            currentSemestre = botonClickeado.getAttribute('data-semester') || botonClickeado.innerText.trim();
             
+            const btnValue = botonClickeado.getAttribute('data-semester') || botonClickeado.innerText.trim();
             const titulo = document.getElementById('titulo-periodo');
-            if (titulo) {
-                titulo.innerText = `Resumen General · Periodo ${currentSemestre}`;
-            }
+            const workspaceComparativa = document.getElementById('workspace-comparativa');
+            const normalSections = document.querySelectorAll('.kpi-row, .chart-row, .section-mb, .grid-12');
             
-            if (currentSemestre !== "Comparar") {
-                actualizarDashboard();
+            if (btnValue === "Comparar") {
+                isComparing = true;
+                if (titulo) titulo.innerText = `Modo Constructor: Comparativa Intersemestral`;
+                if (workspaceComparativa) workspaceComparativa.classList.remove('hidden');
+                normalSections.forEach(el => el.classList.add('hidden'));
+                
+                // Redimensionar gráficas de comparativa si existen
+                // (Se implementará la lógica de renderizado después)
+                
+            } else {
+                isComparing = false;
+                currentSemestre = btnValue;
+                if (titulo) titulo.innerText = `Resumen General · Periodo ${currentSemestre}`;
+                if (workspaceComparativa) workspaceComparativa.classList.add('hidden');
+                normalSections.forEach(el => el.classList.remove('hidden'));
+                
+                // Forzar redimensionamiento de gráficas normales al volver a mostrarlas
+                setTimeout(() => {
+                    [heatmapChart, teachersChart, adaptacionChart, brechaChart, materiasChart, sedesChart, jornadaChart, mapaChart, chartMapaCalor, municipiosChart].forEach(c => c && c.resize());
+                }, 50);
             }
+            actualizarDashboard();
         });
     });
 
@@ -682,3 +754,178 @@ function cargarKPIFantasmas(semestre) {
             document.getElementById('kpi-fantasmas-valor').innerText = '---';
         });
 }
+
+
+// ==================== LÓGICA DE COMPARATIVA DINÁMICA ====================
+const metricaEndpointMap = {
+    "Sedes": "sedes",
+    "Jornada": "jornada",
+    "Materias Filtro": "materias-filtro",
+    "Top Docentes": "teachers"
+};
+
+const graficasComparativas = [];
+
+async function agregarGraficaComparativa(metrica) {
+    const endpoint = metricaEndpointMap[metrica];
+    if (!endpoint) return;
+
+    // 1. Crear contenedor
+    const workspace = document.getElementById('contenedor-graficas-comparativa');
+    if (!workspace) return;
+    
+    const chartWrapper = document.createElement('div');
+    chartWrapper.className = 'card chart-card';
+    chartWrapper.style.padding = '16px';
+    chartWrapper.style.position = 'relative';
+
+    const titleEl = document.createElement('h3');
+    titleEl.className = 'card-title';
+    titleEl.innerText = `Comparativa: ${metrica}`;
+    titleEl.style.marginBottom = '16px';
+    titleEl.style.fontSize = '14px';
+    
+    // Botón para eliminar
+    const btnRemove = document.createElement('button');
+    btnRemove.innerHTML = `
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#94A3B8" stroke-width="2">
+        <line x1="18" y1="6" x2="6" y2="18"></line>
+        <line x1="6" y1="6" x2="18" y2="18"></line>
+    </svg>`;
+    btnRemove.style.position = 'absolute';
+    btnRemove.style.top = '12px';
+    btnRemove.style.right = '12px';
+    btnRemove.style.border = 'none';
+    btnRemove.style.background = 'transparent';
+    btnRemove.style.cursor = 'pointer';
+    btnRemove.title = "Eliminar gráfica";
+    
+    btnRemove.onclick = () => {
+        chartWrapper.remove();
+        // Disponer de la instancia de ECharts
+        const idx = graficasComparativas.indexOf(chartInstance);
+        if (idx > -1) graficasComparativas.splice(idx, 1);
+        chartInstance.dispose();
+    };
+
+    const chartDiv = document.createElement('div');
+    chartDiv.style.width = '100%';
+    chartDiv.style.height = '350px';
+
+    chartWrapper.appendChild(btnRemove);
+    chartWrapper.appendChild(titleEl);
+    chartWrapper.appendChild(chartDiv);
+    workspace.appendChild(chartWrapper);
+
+    // 2. Inicializar ECharts
+    const chartInstance = echarts.init(chartDiv);
+    chartInstance.showLoading();
+    graficasComparativas.push(chartInstance);
+
+    try {
+        // 3. Fetch Data usando Promise.all
+        const [res1, res2] = await Promise.all([
+            fetch(`${API_BASE}/${endpoint}?semestre=2025-1`),
+            fetch(`${API_BASE}/${endpoint}?semestre=2025-2`)
+        ]);
+
+        const raw1 = await res1.json();
+        const raw2 = await res2.json();
+
+        // 4. Procesar y Alinear Categorías
+        const allKeys = new Set();
+        raw1.forEach(item => allKeys.add(item.name));
+        raw2.forEach(item => allKeys.add(item.name));
+        
+        let categories = Array.from(allKeys);
+        
+        // Reverse para gráficas horizontales (Top Docentes, Materias)
+        const isHorizontal = ["Materias Filtro", "Top Docentes"].includes(metrica);
+        if (isHorizontal) {
+            categories.reverse();
+        }
+
+        const map1 = new Map(raw1.map(item => [item.name, item]));
+        const map2 = new Map(raw2.map(item => [item.name, item]));
+
+        const data1 = categories.map(cat => map1.get(cat) || { name: cat, value: 0 });
+        const data2 = categories.map(cat => map2.get(cat) || { name: cat, value: 0 });
+
+        // 5. Configurar ECharts
+        const option = {
+            tooltip: {
+                trigger: 'axis',
+                axisPointer: { type: 'shadow' },
+                formatter: function (params) {
+                    let tooltipHtml = `<b style="font-size:12px;color:#64748b;">${params[0].name}</b><br/>`;
+                    params.forEach(p => {
+                        const d = p.data || {};
+                        const evals = d.total_evaluaciones !== undefined ? ` (Eval: ${d.total_evaluaciones})` : '';
+                        tooltipHtml += `<div style="margin-top: 6px; font-size:13px;">
+                            <span style="display:inline-block;margin-right:6px;border-radius:50%;width:8px;height:8px;background-color:${p.color};"></span>
+                            <b style="color:#0f172a;">${p.seriesName}</b><br/>
+                            <span style="color:#475569;">Mortalidad: <b style="color:#0f172a;">${((d.value || 0) * 100).toFixed(1)}%</b>${evals}</span>
+                        </div>`;
+                    });
+                    return tooltipHtml;
+                },
+                backgroundColor: 'rgba(255, 255, 255, 0.95)',
+                borderColor: '#e2e8f0',
+                textStyle: { color: '#0f172a' },
+                padding: [10, 14]
+            },
+            legend: {
+                data: ['2025-1', '2025-2'],
+                bottom: 0,
+                icon: 'circle'
+            },
+            grid: { left: '3%', right: '4%', bottom: '10%', top: '5%', containLabel: true },
+            series: [
+                {
+                    name: '2025-1',
+                    type: 'bar',
+                    data: data1,
+                    itemStyle: { color: '#1E3A8A', borderRadius: isHorizontal ? [0, 4, 4, 0] : [4, 4, 0, 0] }
+                },
+                {
+                    name: '2025-2',
+                    type: 'bar',
+                    data: data2,
+                    itemStyle: { color: '#F97316', borderRadius: isHorizontal ? [0, 4, 4, 0] : [4, 4, 0, 0] }
+                }
+            ]
+        };
+
+        if (isHorizontal) {
+            option.xAxis = { type: 'value', max: 1, axisLabel: { formatter: val => (val * 100) + '%' } };
+            option.yAxis = { type: 'category', data: categories, axisLabel: { width: 120, overflow: 'truncate' } };
+        } else {
+            option.xAxis = { type: 'category', data: categories, axisLabel: { interval: 0, width: 80, overflow: 'truncate' } };
+            option.yAxis = { type: 'value', max: 1, axisLabel: { formatter: val => (val * 100) + '%' } };
+        }
+
+        chartInstance.setOption(option);
+    } catch (err) {
+        console.error("Error al cargar gráfica comparativa:", err);
+    } finally {
+        chartInstance.hideLoading();
+    }
+}
+
+// Inicializar el Event Listener cuando el DOM esté listo
+document.addEventListener('DOMContentLoaded', () => {
+    const btnAgregar = document.getElementById('btn-agregar-comparativa');
+    if (btnAgregar) {
+        btnAgregar.addEventListener('click', () => {
+            const selectEl = document.getElementById('select-metrica');
+            if (selectEl) {
+                agregarGraficaComparativa(selectEl.value);
+            }
+        });
+    }
+
+    // Asegurarse de que el redimensionamiento aplique a las gráficas dinámicas
+    window.addEventListener('resize', () => {
+        graficasComparativas.forEach(c => c && c.resize());
+    });
+});

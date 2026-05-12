@@ -345,33 +345,12 @@ async def startup():
 @cache(expire=3600)
 def get_heatmap(semestre: str = "2025-2"):
     try:
-        data = supabase_fetch_all('academic_performance', 'student_id, final_grade, class_groups!inner(semester, group_schedules(start_time, day_of_week))', {'class_groups.semester': semestre})
-        if not data: return []
-        df = pd.DataFrame(data)
-        # 1. Normalizar notas (por si vienen con coma colombiana) y quitar nulos
-        df['final_grade'] = df['final_grade'].astype(str).str.replace(',', '.')
-        df['final_grade'] = pd.to_numeric(df['final_grade'], errors='coerce')
-        df = df.dropna(subset=['final_grade'])
-
-        df['mortalidad'] = (df['final_grade'] < 3.0).astype(int)
-        def extract_sched(row):
-            cg = row.get('class_groups', {})
-            scheds = cg.get('group_schedules', []) if isinstance(cg, dict) else []
-            return scheds[0] if scheds else {}
-        df['sched'] = df.apply(extract_sched, axis=1)
-        df['start_time'] = df['sched'].apply(lambda x: x.get('start_time') if isinstance(x, dict) else None)
-        df['day_of_week'] = df['sched'].apply(lambda x: x.get('day_of_week') if isinstance(x, dict) else None)
-        df['hora'] = pd.to_datetime(df['start_time'], format='%H:%M:%S', errors='coerce').dt.hour
-        df['hora'] = df['hora'].apply(lambda x: x + 12 if pd.notnull(x) and x <= 5 else x)
-        limites = [6,8,10,12,14,16,18,20,22]
-        etiquetas = ['06:00-08:00','08:00-10:00','10:00-12:00','12:00-14:00','14:00-16:00','16:00-18:00','18:00-20:00','20:00-22:00']
-        df['franja_horaria'] = pd.cut(df['hora'], bins=limites, labels=etiquetas, right=False).astype(str)
-        dias = {1:'Lunes',2:'Martes',3:'Miércoles',4:'Jueves',5:'Viernes',6:'Sábado'}
-        df['dia_nombre'] = df['day_of_week'].map(dias)
-        df = df.dropna(subset=['franja_horaria','dia_nombre'])
-        result = df.groupby(['franja_horaria','dia_nombre'])['mortalidad'].mean().reset_index()
-        result['mortalidad'] = result['mortalidad'].round(4)
-        return clean_df_for_json(result)
+        supabase = get_supabase_client()
+        query = supabase.table('view_kpi_heatmap').select('*')
+        if semestre:
+            query = query.eq('semester', semestre)
+        res = query.execute()
+        return res.data
     except Exception as e:
         print(f"Error heatmap: {e}")
         return JSONResponse(status_code=400, content={"error": str(e)})
@@ -423,46 +402,29 @@ def get_brecha_ciencias(semestre: str = "2025-2"):
 @cache(expire=3600)
 def get_materias_filtro(semestre: str = "2025-2"):
     try:
-        data = supabase_fetch_all('academic_performance', 'student_id, final_grade, class_groups!inner(semester, subjects(name))', {'class_groups.semester': semestre})
-        if not data: return []
-        df = pd.DataFrame(data)
-        df['subject_name'] = df['class_groups'].apply(lambda x: x.get('subjects',{}).get('name','') if isinstance(x,dict) else '')
-        df = df[~df['subject_name'].str.contains('NIVELATORIO|GRADO|PRACTICA', case=False, na=False)]
-        
-        stats = calcular_mortalidad_sql(df, 'subject_name')
-        stats = stats[stats['total_evaluaciones'] >= 30].sort_values('value', ascending=False).head(10)
-        
-        return clean_df_for_json(stats[['name', 'value', 'total_evaluaciones', 'total_estudiantes_unicos', 'reprobados']])
+        supabase = get_supabase_client()
+        query = supabase.table('view_kpi_materias').select('*')
+        if semestre:
+            query = query.eq('semester', semestre)
+        res = query.execute()
+        return res.data
     except Exception as e:
-        print(f"Error materias-filtro: {e}")
-        return JSONResponse(status_code=400, content={"error": str(e)})
+        print(f"Error materias-filtro view: {e}")
+        return []
 
 @app.get("/api/sedes")
 @cache(expire=3600)
 def get_sedes(semestre: str = "2025-2"):
     try:
-        data = supabase_fetch_all('academic_performance', 'student_id, final_grade, class_groups(semester, subjects(name))', {'class_groups.semester': semestre})
-        if not data: return []
-        df = pd.DataFrame(data)
-        
-        # Extraer el nombre de la materia y filtrar nivelatorios
-        df['materia_nombre'] = df['class_groups'].apply(lambda x: x.get('subjects', {}).get('name', '') if isinstance(x, dict) else '')
-        df = df[~df['materia_nombre'].str.lower().str.contains('nivelatorio', na=False)]
-        
-        data_s = supabase_fetch_all('students', 'id, campus_id')
-        data_c = supabase_fetch_all('campuses', 'id, name')
-        df_s = pd.DataFrame(data_s).rename(columns={'id':'student_id'})
-        df_c = pd.DataFrame(data_c).rename(columns={'id':'campus_id','name':'sede'})
-        df_s = df_s.merge(df_c, on='campus_id', how='left')
-        df = df.merge(df_s, on='student_id', how='inner')
-        
-        stats = calcular_mortalidad_sql(df, 'sede')
-        stats = stats[stats['total_evaluaciones'] >= 10].sort_values('value', ascending=False)
-        
-        return clean_df_for_json(stats[['name', 'value', 'total_evaluaciones', 'total_estudiantes_unicos', 'reprobados']])
+        supabase = get_supabase_client()
+        query = supabase.table('view_kpi_sedes').select('*')
+        if semestre:
+            query = query.eq('semester', semestre)
+        res = query.execute()
+        return res.data
     except Exception as e:
-        print(f"Error sedes: {e}")
-        return JSONResponse(status_code=400, content={"error": str(e)})
+        print(f"Error sedes view: {e}")
+        return []
 
 @app.get("/api/jornada")
 @cache(expire=3600)
