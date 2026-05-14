@@ -199,60 +199,36 @@ def calcular_mortalidad_sql(df, group_col, extra_cols=None):
 def get_kpis(semestre: str = "2025-2"):
     try:
         sb = get_supabase_client()
-        # Total absoluto: solo tabla students, sin joins
-        r_total = sb.table('students').select('*', count='exact').limit(1).execute()
-        total_estudiantes = r_total.count or 0
-
-        # Mortalidad global del semestre
-        # Traemos también el nombre de la asignatura para el KPI dinámico
-        sel = 'student_id, final_grade, class_groups!inner(semester, subjects(name))'
-        data_perf = sb.table('academic_performance').select(sel).eq('class_groups.semester', semestre).limit(100000).execute().data or []
         
-        mortalidad_global = 0.0
-        asignatura_critica = {"nombre": "N/A", "porcentaje": 0.0}
-        fuera_mapa = 0
+        # 1. Consultar la vista maestra
+        res_resumen = sb.table('view_kpi_resumen').select('*').eq('semester', semestre).execute()
+        data_resumen = res_resumen.data
 
-        if data_perf:
-            df = pd.DataFrame(data_perf)
-            df['final_grade'] = pd.to_numeric(df['final_grade'], errors='coerce').fillna(0)
-            df['mortalidad'] = (df['final_grade'] < 3.0).astype(int)
-            mortalidad_global = round(float(df['mortalidad'].mean() * 100), 1)
+        if not data_resumen:
+            return {
+                "total_estudiantes": 0, 
+                "mortalidad_global": 0.0, 
+                "fuera_de_medellin_o_sin_datos": 0, 
+                "asignatura_critica": {"nombre": "N/A", "porcentaje": 0.0}
+            }
 
-            # --- Lógica de Asignatura Crítica ---
-            # Extraer nombre de la materia (navegación segura)
-            df['subject_name'] = df['class_groups'].apply(lambda x: x.get('subjects', {}).get('name', 'N/A') if isinstance(x, dict) else 'N/A')
-            
-            # Filtrar nivelatorios
-            df = df[~df['subject_name'].str.lower().str.contains('nivelatorio', na=False)]
-            
-            # Agrupar para encontrar la de mayor mortalidad (Mínimo 50 evaluaciones)
-            subjects_stats = df.groupby('subject_name').agg(
-                total_estudiantes=('mortalidad', 'count'),
-                tasa_mortalidad=('mortalidad', 'mean')
-            ).reset_index()
-            
-            # Filtro de muestra estadística
-            subjects_stats = subjects_stats[subjects_stats['total_estudiantes'] >= 50]
-            
-            if not subjects_stats.empty:
-                critica = subjects_stats.sort_values('tasa_mortalidad', ascending=False).iloc[0]
-                asignatura_critica = {
-                    "nombre": critica['subject_name'],
-                    "porcentaje": round(float(critica['tasa_mortalidad'] * 100), 1)
-                }
-
-        # Estudiantes sin barrio valido
-        data_stu = supabase_fetch_all('students', 'id, barrio')
-        if data_stu:
-            df_s = pd.DataFrame(data_stu)
-            invalidos = ['DESCONOCIDA','NAN','NONE','','UNKNOWN','** DESCONOCIDA **']
-            fuera_mapa = int(df_s[df_s['barrio'].astype(str).str.upper().str.strip().isin(invalidos)].shape[0])
+        # 2. Consultar la vista de materias (CORREGIDO: ordenando por 'mortalidad', no por 'value')
+        res_mat = sb.table('view_kpi_materias').select('*').eq('semester', semestre).order('mortalidad', desc=True).limit(1).execute()
+        
+        critica_nombre = "N/A"
+        critica_pct = 0.0
+        if res_mat.data:
+            critica_nombre = res_mat.data[0]['asignatura']
+            critica_pct = float(res_mat.data[0]['mortalidad'])
 
         return {
-            "total_estudiantes": total_estudiantes,
-            "mortalidad_global": mortalidad_global,
-            "fuera_de_medellin_o_sin_datos": fuera_mapa,
-            "asignatura_critica": asignatura_critica
+            "total_estudiantes": data_resumen[0]['total_estudiantes'],
+            "mortalidad_global": float(data_resumen[0]['mortalidad_global']),
+            "fuera_de_medellin_o_sin_datos": 0, 
+            "asignatura_critica": {
+                "nombre": critica_nombre,
+                "porcentaje": critica_pct
+            }
         }
     except Exception as e:
         print(f"Error KPIs: {e}")
@@ -346,42 +322,46 @@ async def startup():
 def get_heatmap(semestre: str = "2025-2"):
     try:
         supabase = get_supabase_client()
-        query = supabase.table('view_kpi_heatmap').select('*')
-        if semestre:
-            query = query.eq('semester', semestre)
-        res = query.execute()
-        return res.data
+        data = supabase.table('view_kpi_heatmap').select('*').eq('semester', semestre).execute().data or []
+        return [{
+            "dia_nombre": row.get('dia', ''),
+            "franja_horaria": row.get('hora', ''),
+            "mortalidad": float(row.get('total_estudiantes', 0))
+        } for row in data]
     except Exception as e:
         print(f"Error heatmap: {e}")
         return JSONResponse(status_code=400, content={"error": str(e)})
 
 @app.get("/api/teachers")
 @cache(expire=3600)
-def get_teachers(semestre: str = "2025-2", materia: str = None):
+def get_teachers(semestre: str = "2025-2"):
     try:
         supabase = get_supabase_client()
-        query = supabase.table('view_top_docentes').select('*')
-        if semestre:
-            query = query.eq('semester', semestre)
-        res = query.execute()
-        return res.data
+        data = supabase.table('view_top_docentes').select('*').eq('semester', semestre).execute().data or []
+        return [{
+            "name": str(row.get('teacher_name', 'N/A')),
+            "value": float(row.get('mortalidad', 0)),
+            "total_evaluaciones": int(row.get('total_evaluaciones', 0)),
+            "reprobados": int(row.get('reprobados', 0))
+        } for row in data]
     except Exception as e:
-        print(f"Error teachers view: {e}")
+        print(f"Error teachers: {e}")
         return []
-
 
 @app.get("/api/adaptacion")
 @cache(expire=3600)
 def get_adaptacion(semestre: str = "2025-2"):
     try:
         supabase = get_supabase_client()
-        query = supabase.table('view_kpi_adaptacion').select('*')
-        if semestre:
-            query = query.eq('semester', semestre)
-        res = query.execute()
-        return res.data
+        data = supabase.table('view_kpi_adaptacion').select('*').eq('semester', semestre).execute().data or []
+        return [{
+            "name": str(row.get('estado', 'N/A')),
+            "value": float(row.get('mortalidad', 0)),
+            "total_evaluaciones": int(row.get('total_evaluaciones', 0)),
+            "reprobados": int(row.get('reprobados', 0))
+        } for row in data]
     except Exception as e:
-        print(f"Error adaptacion view: {e}")
+        print(f"Error adaptacion: {e}")
         return []
 
 @app.get("/api/brecha-ciencias")
@@ -389,41 +369,87 @@ def get_adaptacion(semestre: str = "2025-2"):
 def get_brecha_ciencias(semestre: str = "2025-2"):
     try:
         supabase = get_supabase_client()
-        query = supabase.table('view_kpi_genero').select('*')
-        if semestre:
-            query = query.eq('semester', semestre)
-        res = query.execute()
-        return res.data
+        data = supabase.table('view_kpi_genero').select('*').eq('semester', semestre).execute().data or []
+        return [{
+            "name": str(row.get('sexo', 'N/A')),
+            "value": float(row.get('mortalidad', 0)),
+            "total_evaluaciones": int(row.get('total_evaluaciones', 0)),
+            "reprobados": int(row.get('reprobados', 0))
+        } for row in data]
     except Exception as e:
-        print(f"Error brecha view: {e}")
+        print(f"Error brecha: {e}")
         return []
 
-@app.get("/api/materias-filtro")
+# 1. EL ENDPOINT QUE BUSCA JAVASCRIPT (Soluciona el 404)
+@app.get("/api/materias-list") 
 @cache(expire=3600)
-def get_materias_filtro(semestre: str = "2025-2"):
+def get_materias_list(semestre: str = "2025-2"):
+    try:
+        sb = get_supabase_client()
+        res = sb.table('view_kpi_materias').select('*').eq('semester', semestre).order('mortalidad', desc=True).limit(10).execute()
+        return [{"name": str(row['asignatura']), "value": float(row['mortalidad'])} for row in res.data]
+    except Exception as e:
+        print(f"Error materias: {e}")
+        return [] # Array vacío salva a ECharts de colapsar
+
+# 2. EL ENDPOINT DE JORNADA CORREGIDO (Soluciona el error 'get')
+@app.get("/api/jornada")
+@cache(expire=3600)
+def get_jornada(semestre: str = "2025-2"):
+    try:
+        sb = get_supabase_client()
+        res = sb.table('view_kpi_jornada').select('*').eq('semester', semestre).execute()
+        return [{"name": str(row['jornada']), "value": float(row['mortalidad'])} for row in res.data if row['jornada']]
+    except Exception as e:
+        print(f"Error jornada: {e}")
+        return []
+
+# 3. EL NUEVO ENDPOINT DE FANTASMAS
+@app.get("/api/fantasmas")
+@cache(expire=3600)
+def get_fantasmas(semestre: str = "2025-2"):
+    try:
+        sb = get_supabase_client()
+        res = sb.table('view_kpi_estudiantes_fantasmas').select('*').eq('semester', semestre).execute()
+        total = res.data[0]['total_fantasmas'] if res.data and len(res.data) > 0 else 0
+        return {"total_fantasmas": total}
+    except Exception as e:
+        print(f"Error fantasmas: {e}")
+        return {"total_fantasmas": 0}
+@app.get("/api/fantasmas")
+@cache(expire=3600)
+def get_fantasmas(semestre: str = "2025-2"):
     try:
         supabase = get_supabase_client()
-        query = supabase.table('view_kpi_materias').select('*')
-        if semestre:
-            query = query.eq('semester', semestre)
-        res = query.execute()
-        return res.data
+        data = supabase.table('view_kpi_estudiantes_fantasmas').select('*').eq('semester', semestre).execute().data or []
+        
+        # Extraer el valor dependiendo de cómo se llame exactamente la columna en la vista
+        # Intentamos 'estudiantes_fantasma' o 'total_fantasmas'
+        total = 0
+        if data:
+            total = data[0].get('estudiantes_fantasma', data[0].get('total_fantasmas', 0))
+            
+        return {"total_fantasmas": int(total)}
     except Exception as e:
-        print(f"Error materias-filtro view: {e}")
-        return []
+        print(f"Error fantasmas: {e}")
+        return {"total_fantasmas": 0}
 
 @app.get("/api/sedes")
 @cache(expire=3600)
 def get_sedes(semestre: str = "2025-2"):
     try:
         supabase = get_supabase_client()
-        query = supabase.table('view_kpi_sedes').select('*')
-        if semestre:
-            query = query.eq('semester', semestre)
-        res = query.execute()
-        return res.data
+        data = supabase.table('view_kpi_sedes').select('*').eq('semester', semestre).execute().data or []
+        result = [{
+            "name": str(row.get('sede', 'N/A')),
+            "value": float(row.get('mortalidad', 0)),
+            "total_evaluaciones": int(row.get('total_evaluaciones', 0)),
+            "reprobados": int(row.get('reprobados', 0))
+        } for row in data]
+        # Ordenar descendente
+        return sorted(result, key=lambda x: x['value'], reverse=True)
     except Exception as e:
-        print(f"Error sedes view: {e}")
+        print(f"Error sedes: {e}")
         return []
 
 @app.get("/api/jornada")
@@ -431,13 +457,15 @@ def get_sedes(semestre: str = "2025-2"):
 def get_jornada(semestre: str = "2025-2"):
     try:
         supabase = get_supabase_client()
-        query = supabase.table('view_kpi_jornada').select('*')
-        if semestre:
-            query = query.eq('semester', semestre)
-        res = query.execute()
-        return res.data
+        data = supabase.table('view_kpi_jornada').select('*').eq('semester', semestre).execute().data or []
+        return [{
+            "name": str(row.get('jornada', 'N/A')),
+            "value": float(row.get('mortalidad', 0)),
+            "total_evaluaciones": int(row.get('total_evaluaciones', 0)),
+            "reprobados": int(row.get('reprobados', 0))
+        } for row in data]
     except Exception as e:
-        print(f"Error jornada view: {e}")
+        print(f"Error jornada: {e}")
         return []
 
 @app.get("/api/rutas-transporte")
@@ -507,30 +535,13 @@ def get_mapa_poligonos(semestre: str = "2025-2", metrica: str = 'poblacion', niv
         sb = get_supabase_client()
         col_geo = 'barrio' if nivel_geo == 'barrio' else 'comuna'
         
-        # 1. Notas del semestre (grain: registro-nota)
-        data_perf = supabase_fetch_all('academic_performance', 'student_id, final_grade, class_groups!inner(semester)', {'class_groups.semester': semestre})
-        if not data_perf: return []
+        # 1. Consultar vista optimizada
+        data = sb.table('view_kpi_mapa').select('*').eq('semester', semestre).execute().data or []
+        if not data: return []
         
-        # 2. Solo los estudiantes activos en ese semestre
-        student_ids_activos = list({r['student_id'] for r in data_perf})
+        df = pd.DataFrame(data)
         
-        # 3. Datos geográficos de todos los estudiantes
-        data_s = supabase_fetch_all('students', 'id, barrio, comuna')
-        
-        df_p = pd.DataFrame(data_perf)
-        # 1. Normalizar notas (por si vienen con coma colombiana) y quitar nulos
-        df_p['final_grade'] = df_p['final_grade'].astype(str).str.replace(',', '.')
-        df_p['final_grade'] = pd.to_numeric(df_p['final_grade'], errors='coerce')
-        df_p = df_p.dropna(subset=['final_grade'])
-        
-        # Filtrar students al universo del semestre
-        df_s = pd.DataFrame(data_s).rename(columns={'id': 'student_id'})
-        df_s = df_s[df_s['student_id'].isin(student_ids_activos)]
-        
-        # 4. JOIN: unir notas con barrio/comuna del estudiante
-        df = df_p.merge(df_s, on='student_id', how='left')
-        
-        # Aplicar unificación geográfica base
+        # 2. Aplicar unificación geográfica (barrio, comuna)
         df['ubicacion_final'] = df.apply(unificar_ubicacion, axis=1)
         
         # --- SMART GEO-MATCHING (Alinear con GeoJSON) ---
@@ -539,47 +550,42 @@ def get_mapa_poligonos(semestre: str = "2025-2", metrica: str = 'poblacion', niv
         # Filtrar desconocidos para el reporte final del mapa
         df = df[df[col_geo] != 'Desconocido']
         
-        totales = df.groupby(col_geo)['student_id'].nunique().reset_index(name='total_estudiantes')
+        # Convertir a numérico (CORREGIDO: 'total_estudiantes' en lugar de 'total_estudiantes_unicos')
+        for c in ['total_evaluaciones', 'total_estudiantes', 'reprobados']:
+            if c in df.columns:
+                df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
+        
+        # Agrupar por la geografía homologada
+        agg_cols = {
+            'total_evaluaciones': 'sum',
+            'total_estudiantes': 'sum',
+            'reprobados': 'sum'
+        }
+        agg_cols = {k: v for k, v in agg_cols.items() if k in df.columns}
+        
+        agg = df.groupby(col_geo).agg(agg_cols).reset_index()
         
         if metrica == 'poblacion':
-            res = totales.rename(columns={'total_estudiantes': 'value'})
+            agg['value'] = agg['total_estudiantes']
         elif metrica == 'aprobacion':
-            df['aprobado'] = (df['final_grade'] >= 3.0).astype(int)
-            agg = df.groupby(col_geo).agg(aprobados=('aprobado','sum'), total=('aprobado','count')).reset_index()
-            agg['value'] = np.where(agg['total']>0, (agg['aprobados']/agg['total']), 0.0)
+            agg['aprobados'] = agg['total_evaluaciones'] - agg['reprobados']
+            agg['value'] = np.where(agg['total_evaluaciones'] > 0, agg['aprobados'] / agg['total_evaluaciones'], 0.0)
             agg['value'] = agg['value'].round(4)
-            res = agg[[col_geo,'value']]
         elif metrica == 'riesgo':
-            df['perdio'] = (df['final_grade'] < 3.0).astype(int)
-            agg = df.groupby(col_geo).agg(reprobados=('perdio','sum'), total=('perdio','count')).reset_index()
-            agg['value'] = np.where(agg['total']>0, (agg['reprobados']/agg['total']), 0.0)
+            agg['value'] = np.where(agg['total_evaluaciones'] > 0, agg['reprobados'] / agg['total_evaluaciones'], 0.0)
             agg['value'] = agg['value'].round(4)
-            res = agg[[col_geo,'value']]
         else:
             return []
         
-        res = res.merge(totales, on=col_geo, how='left').dropna(subset=['value'])
-        res = res.rename(columns={col_geo: 'name'})
+        # Renombrar solo el nivel geográfico, ya que total_estudiantes ya tiene el nombre correcto
+        agg = agg.rename(columns={col_geo: 'name'})
+        res = agg[['name', 'value', 'total_estudiantes']].dropna(subset=['value'])
         
         print(f"[DEBUG mapa] Registros enviados al frontend: {len(res)}, muestra: {res['name'].head(3).tolist()}")
-        return clean_df_for_json(res[['name','value','total_estudiantes']])
+        return clean_df_for_json(res)
     except Exception as e:
         print(f"Error mapa-poligonos: {e}")
         return JSONResponse(status_code=400, content={"error": str(e)})
-
-    except Exception as e:
-        print(f"Error mapa-poligonos: {e}")
-        return JSONResponse(status_code=400, content={"error": str(e)})
-
-@app.get("/api/materias-list")
-def get_materias_list():
-    try:
-        sb = get_supabase_client()
-        data = sb.table('subjects').select('name').limit(100000).execute().data or []
-        return sorted({r['name'] for r in data if r.get('name')})
-    except Exception as e:
-        print(f"Error materias-list: {e}")
-        return []
 
 # --- CONFIGURACIÓN DE ARCHIVOS ESTÁTICOS PARA PRODUCCIÓN ---
 current_dir = os.path.dirname(os.path.realpath(__file__))

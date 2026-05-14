@@ -10,14 +10,14 @@ async function fetchChartData(endpoint, materiaFilter = '') {
     let url2025_1 = `${API_BASE}/${endpoint}?semestre=2025-1`;
     let url2025_2 = `${API_BASE}/${endpoint}?semestre=2025-2`;
     let urlSingle = `${API_BASE}/${endpoint}?semestre=${currentSemestre}`;
-    
+
     if (materiaFilter) {
         const query = `&materia=${encodeURIComponent(materiaFilter)}`;
         url2025_1 += query;
         url2025_2 += query;
         urlSingle += query;
     }
-    
+
     if (isComparing) {
         const [res1, res2] = await Promise.all([fetch(url2025_1), fetch(url2025_2)]);
         return { isComparing: true, data1: await res1.json(), data2: await res2.json() };
@@ -30,35 +30,35 @@ async function fetchChartData(endpoint, materiaFilter = '') {
 function processChartData(fetchResult, reverse = false) {
     let raw1 = fetchResult.data1 || [];
     let raw2 = fetchResult.data2 || [];
-    
+
     // Sort logic handles Adaptación specific case if needed, but we rely on backend sorting mostly.
     const allKeys = new Set();
     raw1.forEach(item => allKeys.add(item.name));
     if (fetchResult.isComparing) {
         raw2.forEach(item => allKeys.add(item.name));
     }
-    
+
     let categories = Array.from(allKeys);
     if (reverse) categories.reverse();
-    
+
     const map1 = new Map(raw1.map(item => [item.name, item]));
     const map2 = new Map(raw2.map(item => [item.name, item]));
-    
+
     const data1 = categories.map(cat => map1.get(cat) || { name: cat, value: 0, total_evaluaciones: 0, total_estudiantes_unicos: 0, reprobados: 0 });
     const data2 = categories.map(cat => map2.get(cat) || { name: cat, value: 0, total_evaluaciones: 0, total_estudiantes_unicos: 0, reprobados: 0 });
-    
+
     return { categories, data1, data2 };
 }
 
 function getSeriesConfig(processedData) {
     if (isComparing) {
         return [
-            { name: '2025-1', type: 'bar', data: processedData.data1, itemStyle: {color: '#3b82f6'} },
-            { name: '2025-2', type: 'bar', data: processedData.data2, itemStyle: {color: '#f97316'} }
+            { name: '2025-1', type: 'bar', data: processedData.data1, itemStyle: { color: '#3b82f6' } },
+            { name: '2025-2', type: 'bar', data: processedData.data2, itemStyle: { color: '#f97316' } }
         ];
     } else {
         return [
-            { name: currentSemestre, type: 'bar', data: processedData.data1, itemStyle: {color: '#3b82f6'} }
+            { name: currentSemestre, type: 'bar', data: processedData.data1, itemStyle: { color: '#3b82f6' } }
         ];
     }
 }
@@ -88,7 +88,7 @@ async function loadData(semestre) {
         console.warn("Se ignoró una petición porque ya hay una carga masiva en progreso.");
         return;
     }
-    
+
     isFetching = true;
     console.log("--- Iniciando carga de datos defensiva ---");
     [heatmapChart, teachersChart, adaptacionChart, brechaChart, materiasChart, sedesChart, jornadaChart, mapaChart].forEach(c => c && c.showLoading());
@@ -136,7 +136,7 @@ async function loadData(semestre) {
         // Handle array of params for grouped bars (axis trigger) or single param (item trigger)
         const paramList = Array.isArray(params) ? params : [params];
         let tooltipHtml = `<b>${paramList[0].name}</b><br/>`;
-        
+
         paramList.forEach(p => {
             const d = p.data || {};
             tooltipHtml += `<div style="margin-top: 5px;">
@@ -170,7 +170,7 @@ async function loadData(semestre) {
     try {
         console.log("Cargando sección: Adaptación...");
         const fetchRes = await fetchChartData('adaptacion');
-        
+
         // Ensure 1 to 10 fallback if empty
         if (!fetchRes.data1 || fetchRes.data1.length === 0) {
             fetchRes.data1 = Array.from({ length: 10 }, (_, i) => ({ name: `Semestre ${i + 1}`, value: 0.45 - (i * 0.03), total_evaluaciones: 0, total_estudiantes_unicos: 0, reprobados: 0 }));
@@ -181,9 +181,9 @@ async function loadData(semestre) {
 
         const processed = processChartData(fetchRes, false);
         // Sort by semestre number
-        const sortOrder = Array.from({length: 15}, (_, i) => String(i+1));
+        const sortOrder = Array.from({ length: 15 }, (_, i) => String(i + 1));
         const sortIndices = processed.categories.map((c, i) => i).sort((a, b) => sortOrder.indexOf(processed.categories[a]) - sortOrder.indexOf(processed.categories[b]));
-        
+
         processed.categories = sortIndices.map(i => processed.categories[i]);
         processed.data1 = sortIndices.map(i => processed.data1[i]);
         processed.data2 = sortIndices.map(i => processed.data2[i]);
@@ -655,32 +655,17 @@ document.addEventListener('DOMContentLoaded', () => {
             botonesSemestre.forEach(b => b.classList.remove('active'));
             const botonClickeado = e.currentTarget;
             botonClickeado.classList.add('active');
-            
+
             const btnValue = botonClickeado.getAttribute('data-semester') || botonClickeado.innerText.trim();
             const titulo = document.getElementById('titulo-periodo');
-            const workspaceComparativa = document.getElementById('workspace-comparativa');
-            const normalSections = document.querySelectorAll('.kpi-row, .chart-row, .section-mb, .grid-12');
-            
+
             if (btnValue === "Comparar") {
                 isComparing = true;
-                if (titulo) titulo.innerText = `Modo Constructor: Comparativa Intersemestral`;
-                if (workspaceComparativa) workspaceComparativa.classList.remove('hidden');
-                normalSections.forEach(el => el.classList.add('hidden'));
-                
-                // Redimensionar gráficas de comparativa si existen
-                // (Se implementará la lógica de renderizado después)
-                
+                if (titulo) titulo.innerText = `Comparativa: 2025-1 vs 2025-2`;
             } else {
                 isComparing = false;
                 currentSemestre = btnValue;
                 if (titulo) titulo.innerText = `Resumen General · Periodo ${currentSemestre}`;
-                if (workspaceComparativa) workspaceComparativa.classList.add('hidden');
-                normalSections.forEach(el => el.classList.remove('hidden'));
-                
-                // Forzar redimensionamiento de gráficas normales al volver a mostrarlas
-                setTimeout(() => {
-                    [heatmapChart, teachersChart, adaptacionChart, brechaChart, materiasChart, sedesChart, jornadaChart, mapaChart, chartMapaCalor, municipiosChart].forEach(c => c && c.resize());
-                }, 50);
             }
             actualizarDashboard();
         });
@@ -722,210 +707,32 @@ document.addEventListener('DOMContentLoaded', () => {
     actualizarDashboard();
 });
 function cargarKPIFantasmas(semestre) {
-    const url = semestre ? `${API_BASE}/kpi-fantasmas?semestre=${semestre}` : `${API_BASE}/kpi-fantasmas`;
+    // 1. Apuntamos a la nueva ruta exacta de tu api.py
+    const url = semestre ? `${API_BASE}/fantasmas?semestre=${semestre}` : `${API_BASE}/fantasmas`;
 
     fetch(url)
         .then(response => response.json())
         .then(data => {
-            if (data.error) {
-                console.error("Error desde el backend:", data.error);
-                document.getElementById('kpi-fantasmas-valor').innerText = 'Err';
-                return;
+            // 2. Extraemos el total que nos envía la nueva vista SQL
+            const fantasmas = data.total_fantasmas || 0;
+
+            // 3. Actualizamos el número principal
+            const elementoValor = document.getElementById('kpi-fantasmas-valor');
+            if (elementoValor) {
+                elementoValor.innerText = fantasmas.toLocaleString('es-CO');
             }
 
-            // Si es evolución histórica (lista), tomamos el primero
-            const res = Array.isArray(data) ? data[0] : data;
-
-            const fantasmas = res.estudiantes_fantasma || 0;
-            const total = res.total_estudiantes || 0;
-            const porcentaje = res.porcentaje || 0;
-
-            // Actualizar el valor principal
-            document.getElementById('kpi-fantasmas-valor').innerText = fantasmas.toLocaleString('es-CO');
-
-            // Actualizar el subtexto informativo
+            // 4. Actualizamos el subtexto
             const subtextoEl = document.getElementById('kpi-fantasmas-subtexto');
             if (subtextoEl) {
-                subtextoEl.innerHTML = `<b>${porcentaje}%</b> de ${total.toLocaleString('es-CO')} evaluados`;
+                subtextoEl.innerHTML = `Alumnos con notas en cero`;
             }
         })
         .catch(error => {
             console.error('Error de red cargando KPI Fantasmas:', error);
-            document.getElementById('kpi-fantasmas-valor').innerText = '---';
-        });
-}
-
-
-// ==================== LÓGICA DE COMPARATIVA DINÁMICA ====================
-const metricaEndpointMap = {
-    "Sedes": "sedes",
-    "Jornada": "jornada",
-    "Materias Filtro": "materias-filtro",
-    "Top Docentes": "teachers"
-};
-
-const graficasComparativas = [];
-
-async function agregarGraficaComparativa(metrica) {
-    const endpoint = metricaEndpointMap[metrica];
-    if (!endpoint) return;
-
-    // 1. Crear contenedor
-    const workspace = document.getElementById('contenedor-graficas-comparativa');
-    if (!workspace) return;
-    
-    const chartWrapper = document.createElement('div');
-    chartWrapper.className = 'card chart-card';
-    chartWrapper.style.padding = '16px';
-    chartWrapper.style.position = 'relative';
-
-    const titleEl = document.createElement('h3');
-    titleEl.className = 'card-title';
-    titleEl.innerText = `Comparativa: ${metrica}`;
-    titleEl.style.marginBottom = '16px';
-    titleEl.style.fontSize = '14px';
-    
-    // Botón para eliminar
-    const btnRemove = document.createElement('button');
-    btnRemove.innerHTML = `
-    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#94A3B8" stroke-width="2">
-        <line x1="18" y1="6" x2="6" y2="18"></line>
-        <line x1="6" y1="6" x2="18" y2="18"></line>
-    </svg>`;
-    btnRemove.style.position = 'absolute';
-    btnRemove.style.top = '12px';
-    btnRemove.style.right = '12px';
-    btnRemove.style.border = 'none';
-    btnRemove.style.background = 'transparent';
-    btnRemove.style.cursor = 'pointer';
-    btnRemove.title = "Eliminar gráfica";
-    
-    btnRemove.onclick = () => {
-        chartWrapper.remove();
-        // Disponer de la instancia de ECharts
-        const idx = graficasComparativas.indexOf(chartInstance);
-        if (idx > -1) graficasComparativas.splice(idx, 1);
-        chartInstance.dispose();
-    };
-
-    const chartDiv = document.createElement('div');
-    chartDiv.style.width = '100%';
-    chartDiv.style.height = '350px';
-
-    chartWrapper.appendChild(btnRemove);
-    chartWrapper.appendChild(titleEl);
-    chartWrapper.appendChild(chartDiv);
-    workspace.appendChild(chartWrapper);
-
-    // 2. Inicializar ECharts
-    const chartInstance = echarts.init(chartDiv);
-    chartInstance.showLoading();
-    graficasComparativas.push(chartInstance);
-
-    try {
-        // 3. Fetch Data usando Promise.all
-        const [res1, res2] = await Promise.all([
-            fetch(`${API_BASE}/${endpoint}?semestre=2025-1`),
-            fetch(`${API_BASE}/${endpoint}?semestre=2025-2`)
-        ]);
-
-        const raw1 = await res1.json();
-        const raw2 = await res2.json();
-
-        // 4. Procesar y Alinear Categorías
-        const allKeys = new Set();
-        raw1.forEach(item => allKeys.add(item.name));
-        raw2.forEach(item => allKeys.add(item.name));
-        
-        let categories = Array.from(allKeys);
-        
-        // Reverse para gráficas horizontales (Top Docentes, Materias)
-        const isHorizontal = ["Materias Filtro", "Top Docentes"].includes(metrica);
-        if (isHorizontal) {
-            categories.reverse();
-        }
-
-        const map1 = new Map(raw1.map(item => [item.name, item]));
-        const map2 = new Map(raw2.map(item => [item.name, item]));
-
-        const data1 = categories.map(cat => map1.get(cat) || { name: cat, value: 0 });
-        const data2 = categories.map(cat => map2.get(cat) || { name: cat, value: 0 });
-
-        // 5. Configurar ECharts
-        const option = {
-            tooltip: {
-                trigger: 'axis',
-                axisPointer: { type: 'shadow' },
-                formatter: function (params) {
-                    let tooltipHtml = `<b style="font-size:12px;color:#64748b;">${params[0].name}</b><br/>`;
-                    params.forEach(p => {
-                        const d = p.data || {};
-                        const evals = d.total_evaluaciones !== undefined ? ` (Eval: ${d.total_evaluaciones})` : '';
-                        tooltipHtml += `<div style="margin-top: 6px; font-size:13px;">
-                            <span style="display:inline-block;margin-right:6px;border-radius:50%;width:8px;height:8px;background-color:${p.color};"></span>
-                            <b style="color:#0f172a;">${p.seriesName}</b><br/>
-                            <span style="color:#475569;">Mortalidad: <b style="color:#0f172a;">${((d.value || 0) * 100).toFixed(1)}%</b>${evals}</span>
-                        </div>`;
-                    });
-                    return tooltipHtml;
-                },
-                backgroundColor: 'rgba(255, 255, 255, 0.95)',
-                borderColor: '#e2e8f0',
-                textStyle: { color: '#0f172a' },
-                padding: [10, 14]
-            },
-            legend: {
-                data: ['2025-1', '2025-2'],
-                bottom: 0,
-                icon: 'circle'
-            },
-            grid: { left: '3%', right: '4%', bottom: '10%', top: '5%', containLabel: true },
-            series: [
-                {
-                    name: '2025-1',
-                    type: 'bar',
-                    data: data1,
-                    itemStyle: { color: '#1E3A8A', borderRadius: isHorizontal ? [0, 4, 4, 0] : [4, 4, 0, 0] }
-                },
-                {
-                    name: '2025-2',
-                    type: 'bar',
-                    data: data2,
-                    itemStyle: { color: '#F97316', borderRadius: isHorizontal ? [0, 4, 4, 0] : [4, 4, 0, 0] }
-                }
-            ]
-        };
-
-        if (isHorizontal) {
-            option.xAxis = { type: 'value', max: 1, axisLabel: { formatter: val => (val * 100) + '%' } };
-            option.yAxis = { type: 'category', data: categories, axisLabel: { width: 120, overflow: 'truncate' } };
-        } else {
-            option.xAxis = { type: 'category', data: categories, axisLabel: { interval: 0, width: 80, overflow: 'truncate' } };
-            option.yAxis = { type: 'value', max: 1, axisLabel: { formatter: val => (val * 100) + '%' } };
-        }
-
-        chartInstance.setOption(option);
-    } catch (err) {
-        console.error("Error al cargar gráfica comparativa:", err);
-    } finally {
-        chartInstance.hideLoading();
-    }
-}
-
-// Inicializar el Event Listener cuando el DOM esté listo
-document.addEventListener('DOMContentLoaded', () => {
-    const btnAgregar = document.getElementById('btn-agregar-comparativa');
-    if (btnAgregar) {
-        btnAgregar.addEventListener('click', () => {
-            const selectEl = document.getElementById('select-metrica');
-            if (selectEl) {
-                agregarGraficaComparativa(selectEl.value);
+            const elementoValor = document.getElementById('kpi-fantasmas-valor');
+            if (elementoValor) {
+                elementoValor.innerText = '---';
             }
         });
-    }
-
-    // Asegurarse de que el redimensionamiento aplique a las gráficas dinámicas
-    window.addEventListener('resize', () => {
-        graficasComparativas.forEach(c => c && c.resize());
-    });
-});
+}
