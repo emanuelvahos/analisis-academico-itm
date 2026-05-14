@@ -200,7 +200,7 @@ def get_kpis(semestre: str = "2025-2"):
     try:
         sb = get_supabase_client()
         
-        # 1. Consultar la vista maestra
+        # 1. Consultar la vista maestra de resumen
         res_resumen = sb.table('view_kpi_resumen').select('*').eq('semester', semestre).execute()
         data_resumen = res_resumen.data
 
@@ -209,109 +209,37 @@ def get_kpis(semestre: str = "2025-2"):
                 "total_estudiantes": 0, 
                 "mortalidad_global": 0.0, 
                 "fuera_de_medellin_o_sin_datos": 0, 
-                "asignatura_critica": {"nombre": "N/A", "porcentaje": 0.0}
+                "asignatura_critica": {"nombre": "N/A", "porcentaje": 0.0},
+                "total_fantasmas": 0
             }
 
-        # 2. Consultar la vista de materias (CORREGIDO: ordenando por 'mortalidad', no por 'value')
+        # 2. Consultar la vista de materias (ordenando por 'mortalidad')
         res_mat = sb.table('view_kpi_materias').select('*').eq('semester', semestre).order('mortalidad', desc=True).limit(1).execute()
-        
         critica_nombre = "N/A"
         critica_pct = 0.0
         if res_mat.data:
-            critica_nombre = res_mat.data[0]['asignatura']
+            critica_nombre = str(res_mat.data[0]['asignatura'])
             critica_pct = float(res_mat.data[0]['mortalidad'])
 
+        # 3. Consultar la vista de estudiantes fantasmas
+        res_fantasma = sb.table('view_kpi_estudiantes_fantasmas').select('*').eq('semester', semestre).execute()
+        total_fantasmas = 0
+        if res_fantasma.data:
+            total_fantasmas = int(res_fantasma.data[0].get('total_fantasmas', res_fantasma.data[0].get('estudiantes_fantasma', 0)))
+
         return {
-            "total_estudiantes": data_resumen[0]['total_estudiantes'],
+            "total_estudiantes": int(data_resumen[0]['total_estudiantes']),
             "mortalidad_global": float(data_resumen[0]['mortalidad_global']),
             "fuera_de_medellin_o_sin_datos": 0, 
             "asignatura_critica": {
                 "nombre": critica_nombre,
                 "porcentaje": critica_pct
-            }
+            },
+            "total_fantasmas": total_fantasmas
         }
     except Exception as e:
         print(f"Error KPIs: {e}")
         return JSONResponse(status_code=400, content={"error": str(e)})
-
-@app.get("/api/kpi-fantasmas")
-@cache(expire=3600)
-def get_kpi_fantasmas(semestre: str = None):
-    try:
-        # 1. Consulta con JOIN (Inner Join) para acceder al semestre en class_groups
-        supabase = get_supabase_client()
-        # class_groups!inner asegura que solo traiga registros con un grupo válido y permite filtrar por sus columnas
-        query = supabase.table('academic_performance').select('student_id, final_grade, class_groups!inner(semester)')
-        
-        if semestre:
-            query = query.eq('class_groups.semester', semestre)
-        
-        response = query.limit(100000).execute()
-        data = response.data
-        
-        if not data:
-            return {"estudiantes_fantasma": 0, "total_estudiantes": 0, "porcentaje": 0.0, "semestre": semestre} if semestre else []
-            
-        df = pd.DataFrame(data)
-        
-        # 1. Normalizar notas y eliminar nulos
-        df['final_grade'] = df['final_grade'].astype(str).str.replace(',', '.')
-        df['final_grade'] = pd.to_numeric(df['final_grade'], errors='coerce')
-        df = df.dropna(subset=['final_grade'])
-        
-        # Aplanar semestre para agrupaciones
-        df['semester'] = df['class_groups'].apply(lambda x: x.get('semester') if isinstance(x, dict) else None)
-
-        if semestre:
-            # --- LÓGICA CORE (Semestre Específico) ---
-            # Agrupar por estudiante y sacar su nota máxima
-            max_grades = df.groupby('student_id')['final_grade'].max().reset_index()
-            # Filtrar a los que su nota máxima es estrictamente 0.0
-            fantasmas_ids = max_grades[max_grades['final_grade'] == 0.0]['student_id']
-            
-            # Registros de esos estudiantes
-            fantasmas_df = df[df['student_id'].isin(fantasmas_ids)]
-            
-            total_evaluaciones = len(fantasmas_df)
-            total_estudiantes_unicos = fantasmas_df['student_id'].nunique()
-            total_estudiantes_activos = df['student_id'].nunique()
-            
-            return {
-                "name": "Estudiantes Fantasma",
-                "value": 1.0,  # Mortalidad 100%
-                "total_evaluaciones": int(total_evaluaciones),
-                "total_estudiantes_unicos": int(total_estudiantes_unicos),
-                "reprobados": int(total_evaluaciones),
-                "porcentaje_del_total": round((total_estudiantes_unicos / total_estudiantes_activos) * 100, 2) if total_estudiantes_activos > 0 else 0,
-                "semestre": semestre
-            }
-        else:
-            # --- EVOLUCIÓN HISTÓRICA ---
-            evolucion = []
-            for sem_val, group in df.groupby('semester'):
-                # Nota máxima por estudiante en ESTE semestre
-                max_sem = group.groupby('student_id')['final_grade'].max().reset_index()
-                f_ids = max_sem[max_sem['final_grade'] == 0.0]['student_id']
-                
-                f_df = group[group['student_id'].isin(f_ids)]
-                
-                total_sem = group['student_id'].nunique()
-                fantasmas_sem = f_df['student_id'].nunique()
-                
-                evolucion.append({
-                    "semestre": str(sem_val),
-                    "estudiantes_fantasma": int(fantasmas_sem),
-                    "total_estudiantes": int(total_sem),
-                    "porcentaje": round((fantasmas_sem / total_sem) * 100, 1) if total_sem > 0 else 0.0
-                })
-            return sorted(evolucion, key=lambda x: x['semestre'], reverse=True)
-
-    except Exception as e:
-        print(f"Error en KPI Fantasmas: {e}")
-        return JSONResponse(
-            status_code=400, 
-            content={"error": str(e), "estudiantes_fantasma": 0, "total_estudiantes": 0, "porcentaje": 0}
-        )
 
 @app.on_event("startup")
 async def startup():
