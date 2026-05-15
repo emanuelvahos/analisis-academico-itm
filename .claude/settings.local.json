@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python test_endpoints.py)",
+      "Bash(python -X utf8 test_endpoints.py)"
+    ]
+  }
+}
