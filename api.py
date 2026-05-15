@@ -199,47 +199,27 @@ def calcular_mortalidad_sql(df, group_col, extra_cols=None):
 def get_kpis(semestre: str = "2025-2"):
     try:
         sb = get_supabase_client()
-        
-        # 1. Consultar la vista maestra de resumen
+        # 1. KPIs Generales
         res_resumen = sb.table('view_kpi_resumen').select('*').eq('semester', semestre).execute()
         data_resumen = res_resumen.data
 
         if not data_resumen:
-            return {
-                "total_estudiantes": 0, 
-                "mortalidad_global": 0.0, 
-                "fuera_de_medellin_o_sin_datos": 0, 
-                "asignatura_critica": {"nombre": "N/A", "porcentaje": 0.0},
-                "total_fantasmas": 0
-            }
+            return {"total_estudiantes": 0, "mortalidad_global": 0.0, "fuera_de_medellin_o_sin_datos": 0, "asignatura_critica": {"nombre": "N/A", "porcentaje": 0.0}}
 
-        # 2. Consultar la vista de materias (ordenando por 'mortalidad')
+        # 2. Materia más crítica
         res_mat = sb.table('view_kpi_materias').select('*').eq('semester', semestre).order('mortalidad', desc=True).limit(1).execute()
-        critica_nombre = "N/A"
-        critica_pct = 0.0
-        if res_mat.data:
-            critica_nombre = str(res_mat.data[0]['asignatura'])
-            critica_pct = float(res_mat.data[0]['mortalidad'])
-
-        # 3. Consultar la vista de estudiantes fantasmas
-        res_fantasma = sb.table('view_kpi_estudiantes_fantasmas').select('*').eq('semester', semestre).execute()
-        total_fantasmas = 0
-        if res_fantasma.data:
-            total_fantasmas = int(res_fantasma.data[0].get('total_fantasmas', res_fantasma.data[0].get('estudiantes_fantasma', 0)))
+        critica_nombre = res_mat.data[0]['asignatura'] if res_mat.data else "N/A"
+        critica_pct = float(res_mat.data[0]['mortalidad']) if res_mat.data else 0.0
 
         return {
-            "total_estudiantes": int(data_resumen[0]['total_estudiantes']),
+            "total_estudiantes": data_resumen[0]['total_estudiantes'],
             "mortalidad_global": float(data_resumen[0]['mortalidad_global']),
-            "fuera_de_medellin_o_sin_datos": 0, 
-            "asignatura_critica": {
-                "nombre": critica_nombre,
-                "porcentaje": critica_pct
-            },
-            "total_fantasmas": total_fantasmas
+            "fuera_de_medellin_o_sin_datos": 0,
+            "asignatura_critica": {"nombre": critica_nombre, "porcentaje": critica_pct}
         }
     except Exception as e:
         print(f"Error KPIs: {e}")
-        return JSONResponse(status_code=400, content={"error": str(e)})
+        return {"total_estudiantes": 0, "mortalidad_global": 0.0, "fuera_de_medellin_o_sin_datos": 0, "asignatura_critica": {"nombre": "N/A", "porcentaje": 0.0}}
 
 @app.on_event("startup")
 async def startup():
@@ -249,76 +229,56 @@ async def startup():
 @cache(expire=3600)
 def get_heatmap(semestre: str = "2025-2"):
     try:
-        supabase = get_supabase_client()
-        data = supabase.table('view_kpi_heatmap').select('*').eq('semester', semestre).execute().data or []
-        return [{
-            "dia_nombre": row.get('dia', ''),
-            "franja_horaria": row.get('hora', ''),
-            "mortalidad": float(row.get('total_estudiantes', 0))
-        } for row in data]
-    except Exception as e:
-        print(f"Error heatmap: {e}")
-        return JSONResponse(status_code=400, content={"error": str(e)})
+        sb = get_supabase_client()
+        res = sb.table('view_kpi_heatmap').select('*').eq('semester', semestre).execute()
+        return res.data if res.data else []
+    except Exception:
+        return []
 
 @app.get("/api/teachers")
 @cache(expire=3600)
 def get_teachers(semestre: str = "2025-2"):
     try:
-        supabase = get_supabase_client()
-        data = supabase.table('view_top_docentes').select('*').eq('semester', semestre).execute().data or []
-        return [{
-            "name": str(row.get('teacher_name', 'N/A')),
-            "value": float(row.get('mortalidad', 0)),
-            "total_evaluaciones": int(row.get('total_evaluaciones', 0)),
-            "reprobados": int(row.get('reprobados', 0))
-        } for row in data]
-    except Exception as e:
-        print(f"Error teachers: {e}")
-        return []
+        sb = get_supabase_client()
+        res = sb.table('view_top_docentes').select('*').eq('semester', semestre).order('mortalidad', desc=True).limit(10).execute()
+        resultados = [{"name": str(row['teacher_name']), "value": float(row['mortalidad'])} for row in res.data]
+        return resultados if resultados else [{"name": "Sin datos", "value": 0}]
+    except Exception:
+        return [{"name": "Error", "value": 0}]
 
 @app.get("/api/adaptacion")
 @cache(expire=3600)
 def get_adaptacion(semestre: str = "2025-2"):
     try:
-        supabase = get_supabase_client()
-        data = supabase.table('view_kpi_adaptacion').select('*').eq('semester', semestre).execute().data or []
-        return [{
-            "name": str(row.get('estado', 'N/A')),
-            "value": float(row.get('mortalidad', 0)),
-            "total_evaluaciones": int(row.get('total_evaluaciones', 0)),
-            "reprobados": int(row.get('reprobados', 0))
-        } for row in data]
-    except Exception as e:
-        print(f"Error adaptacion: {e}")
-        return []
+        sb = get_supabase_client()
+        res = sb.table('view_kpi_adaptacion').select('*').eq('semester', semestre).execute()
+        resultados = [{"name": str(row['estado']), "value": float(row['mortalidad'])} for row in res.data]
+        return resultados if resultados else [{"name": "Sin datos", "value": 0}]
+    except Exception:
+        return [{"name": "Error", "value": 0}]
 
 @app.get("/api/brecha-ciencias")
 @cache(expire=3600)
-def get_brecha_ciencias(semestre: str = "2025-2"):
+def get_brecha(semestre: str = "2025-2"):
     try:
-        supabase = get_supabase_client()
-        data = supabase.table('view_kpi_genero').select('*').eq('semester', semestre).execute().data or []
-        return [{
-            "name": str(row.get('sexo', 'N/A')),
-            "value": float(row.get('mortalidad', 0)),
-            "total_evaluaciones": int(row.get('total_evaluaciones', 0)),
-            "reprobados": int(row.get('reprobados', 0))
-        } for row in data]
-    except Exception as e:
-        print(f"Error brecha: {e}")
-        return []
+        sb = get_supabase_client()
+        res = sb.table('view_kpi_genero').select('*').eq('semester', semestre).execute()
+        resultados = [{"name": str(row['sexo']), "value": float(row['mortalidad'])} for row in res.data]
+        return resultados if resultados else [{"name": "Sin datos", "value": 0}]
+    except Exception:
+        return [{"name": "Error", "value": 0}]
 
 # 1. EL ENDPOINT QUE BUSCA JAVASCRIPT (Soluciona el 404)
-@app.get("/api/materias-list") 
+@app.get("/api/materias-filtro")
 @cache(expire=3600)
-def get_materias_list(semestre: str = "2025-2"):
+def get_materias_filtro(semestre: str = "2025-2"):
     try:
         sb = get_supabase_client()
         res = sb.table('view_kpi_materias').select('*').eq('semester', semestre).order('mortalidad', desc=True).limit(10).execute()
-        return [{"name": str(row['asignatura']), "value": float(row['mortalidad'])} for row in res.data]
+        resultados = [{"name": str(row['asignatura']), "value": float(row['mortalidad'])} for row in res.data]
+        return resultados if resultados else [{"name": "Sin datos", "value": 0}]
     except Exception as e:
-        print(f"Error materias: {e}")
-        return [] # Array vacío salva a ECharts de colapsar
+        return [{"name": "Error", "value": 0}]
 
 # 2. EL ENDPOINT DE JORNADA CORREGIDO (Soluciona el error 'get')
 @app.get("/api/jornada")
@@ -327,10 +287,10 @@ def get_jornada(semestre: str = "2025-2"):
     try:
         sb = get_supabase_client()
         res = sb.table('view_kpi_jornada').select('*').eq('semester', semestre).execute()
-        return [{"name": str(row['jornada']), "value": float(row['mortalidad'])} for row in res.data if row['jornada']]
+        resultados = [{"name": str(row['jornada']), "value": float(row['mortalidad'])} for row in res.data if row.get('jornada')]
+        return resultados if resultados else [{"name": "Sin datos", "value": 0}]
     except Exception as e:
-        print(f"Error jornada: {e}")
-        return []
+        return [{"name": "Error", "value": 0}]
 
 # 3. EL NUEVO ENDPOINT DE FANTASMAS
 @app.get("/api/fantasmas")
@@ -339,25 +299,8 @@ def get_fantasmas(semestre: str = "2025-2"):
     try:
         sb = get_supabase_client()
         res = sb.table('view_kpi_estudiantes_fantasmas').select('*').eq('semester', semestre).execute()
-        total = res.data[0]['total_fantasmas'] if res.data and len(res.data) > 0 else 0
+        total = res.data[0]['total_fantasmas'] if res.data else 0
         return {"total_fantasmas": total}
-    except Exception as e:
-        print(f"Error fantasmas: {e}")
-        return {"total_fantasmas": 0}
-@app.get("/api/fantasmas")
-@cache(expire=3600)
-def get_fantasmas(semestre: str = "2025-2"):
-    try:
-        supabase = get_supabase_client()
-        data = supabase.table('view_kpi_estudiantes_fantasmas').select('*').eq('semester', semestre).execute().data or []
-        
-        # Extraer el valor dependiendo de cómo se llame exactamente la columna en la vista
-        # Intentamos 'estudiantes_fantasma' o 'total_fantasmas'
-        total = 0
-        if data:
-            total = data[0].get('estudiantes_fantasma', data[0].get('total_fantasmas', 0))
-            
-        return {"total_fantasmas": int(total)}
     except Exception as e:
         print(f"Error fantasmas: {e}")
         return {"total_fantasmas": 0}
@@ -366,19 +309,12 @@ def get_fantasmas(semestre: str = "2025-2"):
 @cache(expire=3600)
 def get_sedes(semestre: str = "2025-2"):
     try:
-        supabase = get_supabase_client()
-        data = supabase.table('view_kpi_sedes').select('*').eq('semester', semestre).execute().data or []
-        result = [{
-            "name": str(row.get('sede', 'N/A')),
-            "value": float(row.get('mortalidad', 0)),
-            "total_evaluaciones": int(row.get('total_evaluaciones', 0)),
-            "reprobados": int(row.get('reprobados', 0))
-        } for row in data]
-        # Ordenar descendente
-        return sorted(result, key=lambda x: x['value'], reverse=True)
+        sb = get_supabase_client()
+        res = sb.table('view_kpi_sedes').select('*').eq('semester', semestre).execute()
+        resultados = [{"name": str(row['sede']), "value": float(row['mortalidad'])} for row in res.data if row.get('sede')]
+        return sorted(resultados, key=lambda x: x['value'], reverse=True) if resultados else [{"name": "Sin datos", "value": 0}]
     except Exception as e:
-        print(f"Error sedes: {e}")
-        return []
+        return [{"name": "Error", "value": 0}]
 
 @app.get("/api/jornada")
 @cache(expire=3600)

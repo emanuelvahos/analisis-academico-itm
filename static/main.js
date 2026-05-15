@@ -100,12 +100,12 @@ async function loadData(semestre) {
         const targetSemestre = isComparing ? '2025-2' : semestre;
         const kpiRes = await fetch(`${API_BASE}/kpis?semestre=${targetSemestre}`);
         const kpiData = await kpiRes.json();
-        
+
         console.log(`[DEBUG] KPIs | Semestre: ${targetSemestre} | Datos:`, kpiData);
 
         if (document.getElementById('kpi-mortalidad')) document.getElementById('kpi-mortalidad').innerText = kpiData.mortalidad_global;
         if (document.getElementById('kpi-estudiantes')) document.getElementById('kpi-estudiantes').innerText = kpiData.total_estudiantes.toLocaleString('es-CO');
-        
+
         // Carga directa del valor de fantasmas desde el JSON unificado
         if (document.getElementById('kpi-fantasmas-valor')) {
             const fantasmas = kpiData.total_fantasmas || 0;
@@ -228,8 +228,8 @@ async function loadData(semestre) {
     try {
         console.log("Cargando sección: Materias Filtro...");
         // API correcta: /api/materias-list
-        const fetchRes = await fetchChartData('materias-list'); 
-        
+        const fetchRes = await fetchChartData('materias-list');
+
         // Protección contra undefined (El problema de forEach)
         if (!Array.isArray(fetchRes.data1)) fetchRes.data1 = [];
         if (!Array.isArray(fetchRes.data2)) fetchRes.data2 = [];
@@ -271,7 +271,7 @@ async function loadData(semestre) {
     try {
         console.log("Cargando sección: Jornada...");
         const fetchRes = await fetchChartData('jornada');
-        
+
         // Protección contra undefined
         if (!Array.isArray(fetchRes.data1)) fetchRes.data1 = [];
         if (!Array.isArray(fetchRes.data2)) fetchRes.data2 = [];
@@ -617,18 +617,12 @@ document.addEventListener('DOMContentLoaded', () => {
         tooltip: {
             trigger: 'item',
             backgroundColor: 'rgba(15, 23, 42, 0.9)',
-            textStyle: { color: '#fff' },
-            formatter: function (params) {
-                const d = params.data || params;
-                return `<b>${d.name}</b><br/>` +
-                    `Evaluaciones Totales: <br/> +
-                           Estudiantes Únicos: ${d.total || 0}<br/>` +
-                    `Reprobados: ${d.reprobados || 0}<br/>` +
-                    `Mortalidad: ${((d.value || 0) * 100).toFixed(1)}%`;
-            }
+            textStyle: { color: '#fff' }
         },
-        legend: { orient: 'vertical', left: 'left' },
-        series: [{ name: 'Jornada', type: 'pie', radius: '50%', data: [], label: { show: true, formatter: '{b}: {d}%' } }]
+        grid: { left: '5%', right: '5%', bottom: '5%', top: '10%', containLabel: true },
+        xAxis: { type: 'category', data: [] },
+        yAxis: { type: 'value', axisLabel: { formatter: v => Math.round(v * 100) + '%' } },
+        series: [{ type: 'bar', data: [], itemStyle: { color: '#10B981' } }]
     });
 
     mapaChart.setOption({
@@ -729,16 +723,20 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // Cargar lista de materias para el select
-    fetch(`${API_BASE}/materias-list`)
+    fetch(`${API_BASE}/materias-list?semestre=2025-2`)
         .then(res => res.json())
         .then(materias => {
-            materias.forEach(m => {
-                const opt = document.createElement('option');
-                opt.value = m;
-                opt.textContent = m;
-                selectDocentes.appendChild(opt);
-            });
-        });
+            if (Array.isArray(materias)) {
+                materias.forEach(m => {
+                    const opt = document.createElement('option');
+                    const val = m.name || m; // Extrae el nombre correctamente
+                    opt.value = val;
+                    opt.textContent = val;
+                    if (selectDocentes) selectDocentes.appendChild(opt);
+                });
+            }
+        })
+        .catch(e => console.warn("[DEBUG] Error cargando select de materias:", e));
 
     // F. Carga Inicial
     actualizarDashboard();
